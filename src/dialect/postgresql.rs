@@ -23,12 +23,16 @@ impl Dialect for PostgreSqlDialect {
     fn is_identifier_start(&self, ch: char) -> bool {
         // See https://www.postgresql.org/docs/11/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS
         // We don't yet support identifiers beginning with "letters with
-        // diacritical marks"
-        ch.is_alphabetic() || ch == '_'
+        // diacritical marks and non-Latin letters"
+        ch.is_ascii_lowercase() || ch.is_ascii_uppercase() || ch == '_' || ch == '$'
     }
 
     fn is_identifier_part(&self, ch: char) -> bool {
-        ch.is_alphabetic() || ch.is_ascii_digit() || ch == '$' || ch == '_'
+        ch.is_ascii_lowercase()
+            || ch.is_ascii_uppercase()
+            || ch.is_ascii_digit()
+            || ch == '$'
+            || ch == '_'
     }
 
     fn parse_statement(&self, parser: &mut Parser) -> Option<Result<Statement, ParserError>> {

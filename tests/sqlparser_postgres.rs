@@ -1687,6 +1687,11 @@ fn parse_pg_regex_match_ops() {
 fn parse_array_index_expr() {
     let num: Vec<Expr> = (0..=10)
         .map(|s| Expr::Value(number(&s.to_string())))
+        .map(|s| Expr::Value(Value::Number(bigdecimal::BigDecimal::from(s), false)))
+        .collect();
+    #[cfg(not(feature = "bigdecimal"))]
+    let num: Vec<Expr> = (0..=10)
+        .map(|s| Expr::Value(Value::Number(s.to_string(), false)))
         .collect();
 
     let sql = "SELECT foo[0] FROM foos";

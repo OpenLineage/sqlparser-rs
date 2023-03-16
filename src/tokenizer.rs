@@ -685,6 +685,28 @@ impl<'a> Tokenizer<'a> {
                         }
                     }
                 }
+                // identifier or keyword
+                ch if self.dialect.is_identifier_start(ch) => {
+                    chars.next(); // consume the first char
+                    let word = self.tokenize_word(ch, chars);
+
+                    // TODO: implement parsing of exponent here
+                    if word.chars().all(|x| x.is_ascii_digit() || x == '.') {
+                        let mut inner_state = State {
+                            peekable: word.chars().peekable(),
+                            line: 0,
+                            col: 0,
+                        };
+                        let mut s = peeking_take_while(&mut inner_state, |ch| {
+                            matches!(ch, '0'..='9' | '.')
+                        });
+                        let s2 = peeking_take_while(chars, |ch| matches!(ch, '0'..='9' | '.'));
+                        s += s2.as_str();
+                        return Ok(Some(Token::Number(s, false)));
+                    }
+
+                    Ok(Some(Token::make_word(&word, None)))
+                }
                 // single quoted string
                 '\'' => {
                     let s = self.tokenize_quoted_string(chars, '\'')?;
