@@ -24,7 +24,7 @@ impl Dialect for PostgreSqlDialect {
         // See https://www.postgresql.org/docs/11/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS
         // We don't yet support identifiers beginning with "letters with
         // diacritical marks and non-Latin letters"
-        ch.is_ascii_lowercase() || ch.is_ascii_uppercase() || ch == '_' || ch == '$'
+        ch.is_alphabetic() || ch == '_'
     }
 
     fn is_identifier_part(&self, ch: char) -> bool {

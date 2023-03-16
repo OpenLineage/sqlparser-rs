@@ -71,7 +71,8 @@ fn test_snowflake_single_line_tokenize() {
     assert_eq!(expected, tokens);
 
     let sql = "CREATE TABLE // this is a comment \ntable_1";
-    let tokens = Tokenizer::new(&dialect, sql).tokenize().unwrap();
+    let mut tokenizer = Tokenizer::new(&dialect, sql);
+    let tokens = tokenizer.tokenize().unwrap();
 
     let expected = vec![
         Token::make_keyword("CREATE"),
