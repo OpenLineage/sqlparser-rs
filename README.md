@@ -1,3 +1,6 @@
+| This is an unofficial fork of [sqlparser-rs/sqlparser-rs](https://github.com/sqlparser-rs/sqlparser-rs) for use by [OpenLineage](https://github.com/OpenLineage/OpenLineage) integrations. |
+| --------------------------------------------------------------------------------------------------------- |
+
 # Extensible SQL Lexer and Parser for Rust
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
