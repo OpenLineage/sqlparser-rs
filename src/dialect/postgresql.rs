@@ -25,14 +25,10 @@ impl Dialect for PostgreSqlDialect {
         // We don't yet support identifiers beginning with "letters with
         // diacritical marks and non-Latin letters"
         ch.is_ascii_lowercase() || ch.is_ascii_uppercase() || ch == '_' || ch == '$'
-    }
+∂    }
 
     fn is_identifier_part(&self, ch: char) -> bool {
-        ch.is_ascii_lowercase()
-            || ch.is_ascii_uppercase()
-            || ch.is_ascii_digit()
-            || ch == '$'
-            || ch == '_'
+        ch.is_alphabetic() || ch.is_ascii_digit() || ch == '$' || ch == '_'
     }
 
     fn parse_statement(&self, parser: &mut Parser) -> Option<Result<Statement, ParserError>> {
