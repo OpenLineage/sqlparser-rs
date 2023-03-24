@@ -44,6 +44,9 @@ pub use self::value::{
     escape_quoted_string, DateTimeField, DollarQuotedString, TrimWhereField, Value,
 };
 
+use crate::ast::helpers::stmt_data_loading::{
+    DataLoadingOptions, StageLoadSelectItem, StageParamsObject,
+};
 #[cfg(feature = "visitor")]
 pub use visitor::*;
 
@@ -1186,6 +1189,26 @@ pub enum Statement {
         /// VALUES a vector of values to be copied
         values: Vec<Option<String>>,
     },
+    /// ```sql
+    /// COPY INTO
+    /// ```
+    /// See <https://docs.snowflake.com/en/sql-reference/sql/copy-into-table>
+    /// Copy Into syntax available for Snowflake is different than the one implemented in
+    /// Postgres. Although they share common prefix, it is reasonable to implement them
+    /// in different enums. This can be refactored later once custom dialects
+    /// are allowed to have custom Statements.
+    CopyIntoSnowflake {
+        into: ObjectName,
+        from_stage: ObjectName,
+        from_stage_alias: Option<Ident>,
+        stage_params: StageParamsObject,
+        from_transformations: Option<Vec<StageLoadSelectItem>>,
+        files: Option<Vec<String>>,
+        pattern: Option<String>,
+        file_format: DataLoadingOptions,
+        copy_options: DataLoadingOptions,
+        validation_mode: Option<String>,
+    },
     /// Close - closes the portal underlying an open cursor.
     Close {
         /// Cursor name
@@ -1523,6 +1546,21 @@ pub enum Statement {
         return_type: Option<DataType>,
         /// Optional parameters.
         params: CreateFunctionBody,
+    },
+    /// ```sql
+    /// CREATE STAGE
+    /// ```
+    /// See <https://docs.snowflake.com/en/sql-reference/sql/create-stage>
+    CreateStage {
+        or_replace: bool,
+        temporary: bool,
+        if_not_exists: bool,
+        name: ObjectName,
+        stage_params: StageParamsObject,
+        directory_table_params: DataLoadingOptions,
+        file_format: DataLoadingOptions,
+        copy_options: DataLoadingOptions,
+        comment: Option<String>,
     },
     /// `ASSERT <condition> [AS <message>]`
     Assert {
@@ -2746,6 +2784,96 @@ impl fmt::Display for Statement {
                 }
                 write!(f, "")
             }
+            Statement::CreateStage {
+                or_replace,
+                temporary,
+                if_not_exists,
+                name,
+                stage_params,
+                directory_table_params,
+                file_format,
+                copy_options,
+                comment,
+                ..
+            } => {
+                write!(
+                    f,
+                    "CREATE {or_replace}{temp}STAGE {if_not_exists}{name}{stage_params}",
+                    temp = if *temporary { "TEMPORARY " } else { "" },
+                    or_replace = if *or_replace { "OR REPLACE " } else { "" },
+                    if_not_exists = if *if_not_exists { "IF NOT EXISTS " } else { "" },
+                )?;
+                if !directory_table_params.options.is_empty() {
+                    write!(f, " DIRECTORY=({})", directory_table_params)?;
+                }
+                if !file_format.options.is_empty() {
+                    write!(f, " FILE_FORMAT=({})", file_format)?;
+                }
+                if !copy_options.options.is_empty() {
+                    write!(f, " COPY_OPTIONS=({})", copy_options)?;
+                }
+                if comment.is_some() {
+                    write!(f, " COMMENT='{}'", comment.as_ref().unwrap())?;
+                }
+                Ok(())
+            }
+            Statement::CopyIntoSnowflake {
+                into,
+                from_stage,
+                from_stage_alias,
+                stage_params: _stage_params,
+                from_transformations,
+                files,
+                pattern,
+                file_format,
+                copy_options,
+                validation_mode,
+            } => {
+                write!(f, "COPY INTO {}", into)?;
+                if from_transformations.is_none() {
+                    // Standard data load
+                    write!(f, " FROM {}", from_stage)?;
+                    if from_stage_alias.as_ref().is_some() {
+                        write!(f, " AS {}", from_stage_alias.as_ref().unwrap())?;
+                    }
+                } else {
+                    // Data load with transformation
+                    write!(
+                        f,
+                        " FROM (SELECT {} FROM {}",
+                        display_separated(from_transformations.as_ref().unwrap(), ", "),
+                        from_stage,
+                    )?;
+                    if from_stage_alias.as_ref().is_some() {
+                        write!(f, " AS {}", from_stage_alias.as_ref().unwrap())?;
+                    }
+                    write!(f, ")")?;
+                }
+                if files.is_some() {
+                    write!(
+                        f,
+                        " FILES = ('{}')",
+                        display_separated(files.as_ref().unwrap(), "', '")
+                    )?;
+                }
+                if pattern.is_some() {
+                    write!(f, " PATTERN = '{}'", pattern.as_ref().unwrap())?;
+                }
+                if !file_format.options.is_empty() {
+                    write!(f, " FILE_FORMAT=({})", file_format)?;
+                }
+                if !copy_options.options.is_empty() {
+                    write!(f, " COPY_OPTIONS=({})", copy_options)?;
+                }
+                if validation_mode.is_some() {
+                    write!(
+                        f,
+                        " VALIDATION_MODE = {}",
+                        validation_mode.as_ref().unwrap()
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -3405,6 +3533,7 @@ pub enum ObjectType {
     Schema,
     Role,
     Sequence,
+    Stage,
 }
 
 impl fmt::Display for ObjectType {
@@ -3416,6 +3545,7 @@ impl fmt::Display for ObjectType {
             ObjectType::Schema => "SCHEMA",
             ObjectType::Role => "ROLE",
             ObjectType::Sequence => "SEQUENCE",
+            ObjectType::Stage => "STAGE",
         })
     }
 }
