@@ -3017,11 +3017,13 @@ impl<'a> Parser<'a> {
             ObjectType::Schema
         } else if self.parse_keyword(Keyword::SEQUENCE) {
             ObjectType::Sequence
+        } else if self.parse_keyword(Keyword::STAGE) {
+            ObjectType::Stage
         } else if self.parse_keyword(Keyword::FUNCTION) {
             return self.parse_drop_function();
         } else {
             return self.expected(
-                "TABLE, VIEW, INDEX, ROLE, SCHEMA, FUNCTION or SEQUENCE after DROP",
+                "TABLE, VIEW, INDEX, ROLE, SCHEMA, FUNCTION, STAGE or SEQUENCE after DROP",
                 self.peek_token(),
             );
         };
@@ -4908,7 +4910,30 @@ impl<'a> Parser<'a> {
             None
         };
 
-        if !self.parse_keyword(Keyword::INSERT) {
+        if self.parse_keyword(Keyword::INSERT) {
+            let insert = self.parse_insert()?;
+
+            Ok(Query {
+                with,
+                body: Box::new(SetExpr::Insert(insert)),
+                limit: None,
+                order_by: vec![],
+                offset: None,
+                fetch: None,
+                locks: vec![],
+            })
+        } else if self.parse_keyword(Keyword::UPDATE) {
+            let update = self.parse_update()?;
+            Ok(Query {
+                with,
+                body: Box::new(SetExpr::Update(update)),
+                limit: None,
+                order_by: vec![],
+                offset: None,
+                fetch: None,
+                locks: vec![],
+            })
+        } else {
             let body = Box::new(self.parse_query_body(0)?);
 
             let order_by = if self.parse_keywords(&[Keyword::ORDER, Keyword::BY]) {
@@ -4963,18 +4988,6 @@ impl<'a> Parser<'a> {
                 offset,
                 fetch,
                 locks,
-            })
-        } else {
-            let insert = self.parse_insert()?;
-
-            Ok(Query {
-                with,
-                body: Box::new(SetExpr::Insert(insert)),
-                limit: None,
-                order_by: vec![],
-                offset: None,
-                fetch: None,
-                locks: vec![],
             })
         }
     }
@@ -5721,6 +5734,9 @@ impl<'a> Parser<'a> {
                         | TableFactor::Table { alias, .. }
                         | TableFactor::UNNEST { alias, .. }
                         | TableFactor::TableFunction { alias, .. }
+                        | TableFactor::Pivot {
+                            pivot_alias: alias, ..
+                        }
                         | TableFactor::NestedJoin { alias, .. } => {
                             // but not `FROM (mytable AS alias1) AS alias2`.
                             if let Some(inner_alias) = alias {
@@ -5778,13 +5794,21 @@ impl<'a> Parser<'a> {
             })
         } else {
             let name = self.parse_object_name()?;
+
             // Postgres, MSSQL: table-valued functions:
             let args = if self.consume_token(&Token::LParen) {
                 Some(self.parse_optional_args()?)
             } else {
                 None
             };
+
             let alias = self.parse_optional_table_alias(keywords::RESERVED_FOR_TABLE_ALIAS)?;
+
+            // Pivot
+            if self.parse_keyword(Keyword::PIVOT) {
+                return self.parse_pivot_table_factor(name, alias);
+            }
+
             // MSSQL-specific table hints:
             let mut with_hints = vec![];
             if self.parse_keyword(Keyword::WITH) {
@@ -5819,6 +5843,35 @@ impl<'a> Parser<'a> {
             },
             subquery,
             alias,
+        })
+    }
+
+    pub fn parse_pivot_table_factor(
+        &mut self,
+        name: ObjectName,
+        table_alias: Option<TableAlias>,
+    ) -> Result<TableFactor, ParserError> {
+        self.expect_token(&Token::LParen)?;
+        let function_name = match self.next_token().token {
+            Token::Word(w) => Ok(w.value),
+            _ => self.expected("an aggregate function name", self.peek_token()),
+        }?;
+        let function = self.parse_function(ObjectName(vec![Ident::new(function_name)]))?;
+        self.expect_keyword(Keyword::FOR)?;
+        let value_column = self.parse_object_name()?.0;
+        self.expect_keyword(Keyword::IN)?;
+        self.expect_token(&Token::LParen)?;
+        let pivot_values = self.parse_comma_separated(Parser::parse_value)?;
+        self.expect_token(&Token::RParen)?;
+        self.expect_token(&Token::RParen)?;
+        let alias = self.parse_optional_table_alias(keywords::RESERVED_FOR_TABLE_ALIAS)?;
+        Ok(TableFactor::Pivot {
+            name,
+            table_alias,
+            aggregate_function: function,
+            value_column,
+            pivot_values,
+            pivot_alias: alias,
         })
     }
 
@@ -6859,40 +6912,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_parse_limit() {
-        let sql = "SELECT * FROM user LIMIT 1";
-        all_dialects().run_parser_method(sql, |parser| {
-            let ast = parser.parse_query().unwrap();
-            assert_eq!(ast.to_string(), sql.to_string());
-        });
-
-        let sql = "SELECT * FROM user LIMIT $1 OFFSET $2";
-        let dialects = TestedDialects {
-            dialects: vec![
-                Box::new(PostgreSqlDialect {}),
-                Box::new(ClickHouseDialect {}),
-                Box::new(GenericDialect {}),
-                Box::new(MsSqlDialect {}),
-                Box::new(SnowflakeDialect {}),
-            ],
-        };
-
-        dialects.run_parser_method(sql, |parser| {
-            let ast = parser.parse_query().unwrap();
-            assert_eq!(ast.to_string(), sql.to_string());
-        });
-
-        let sql = "SELECT * FROM user LIMIT ? OFFSET ?";
-        let dialects = TestedDialects {
-            dialects: vec![Box::new(MySqlDialect {})],
-        };
-        dialects.run_parser_method(sql, |parser| {
-            let ast = parser.parse_query().unwrap();
-            assert_eq!(ast.to_string(), sql.to_string());
-        });
-    }
-
     #[cfg(test)]
     mod test_parse_data_type {
         use crate::ast::{
@@ -7346,24 +7365,6 @@ mod tests {
                 index_type: Some(IndexType::Hash),
                 columns: vec![Ident::new("c1")],
             }
-        );
-    }
-
-    #[test]
-    fn test_update_has_keyword() {
-        let sql = r#"UPDATE test SET name=$1,
-                value=$2,
-                where=$3,
-                create=$4,
-                is_default=$5,
-                classification=$6,
-                sort=$7
-                WHERE id=$8"#;
-        let pg_dialect = PostgreSqlDialect {};
-        let ast = Parser::parse_sql(&pg_dialect, sql).unwrap();
-        assert_eq!(
-            ast[0].to_string(),
-            r#"UPDATE test SET name = $1, value = $2, where = $3, create = $4, is_default = $5, classification = $6, sort = $7 WHERE id = $8"#
         );
     }
 

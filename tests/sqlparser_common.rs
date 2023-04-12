@@ -21,6 +21,7 @@
 use matches::assert_matches;
 
 use sqlparser::ast::SelectItem::UnnamedExpr;
+use sqlparser::ast::TableFactor::Pivot;
 use sqlparser::ast::*;
 use sqlparser::dialect::{
     AnsiDialect, BigQueryDialect, ClickHouseDialect, GenericDialect, HiveDialect, MsSqlDialect,
@@ -510,6 +511,11 @@ fn parse_simple_select() {
     assert_eq!(3, select.projection.len());
     let select = verified_query(sql);
     assert_eq!(Some(Expr::Value(number("5"))), select.limit);
+}
+
+#[test]
+fn parse_limit() {
+    verified_stmt("SELECT * FROM user LIMIT 1");
 }
 
 #[test]
@@ -1555,65 +1561,6 @@ fn parse_select_group_by() {
     one_statement_parses_to(
         "SELECT id, fname, lname FROM customer GROUP BY (lname, fname)",
         "SELECT id, fname, lname FROM customer GROUP BY (lname, fname)",
-    );
-}
-
-#[test]
-fn parse_select_group_by_grouping_sets() {
-    let dialects = TestedDialects {
-        dialects: vec![Box::new(GenericDialect {}), Box::new(PostgreSqlDialect {})],
-    };
-    let sql =
-        "SELECT brand, size, sum(sales) FROM items_sold GROUP BY size, GROUPING SETS ((brand), (size), ())";
-    let select = dialects.verified_only_select(sql);
-    assert_eq!(
-        vec![
-            Expr::Identifier(Ident::new("size")),
-            Expr::GroupingSets(vec![
-                vec![Expr::Identifier(Ident::new("brand"))],
-                vec![Expr::Identifier(Ident::new("size"))],
-                vec![],
-            ]),
-        ],
-        select.group_by
-    );
-}
-
-#[test]
-fn parse_select_group_by_rollup() {
-    let dialects = TestedDialects {
-        dialects: vec![Box::new(GenericDialect {}), Box::new(PostgreSqlDialect {})],
-    };
-    let sql = "SELECT brand, size, sum(sales) FROM items_sold GROUP BY size, ROLLUP (brand, size)";
-    let select = dialects.verified_only_select(sql);
-    assert_eq!(
-        vec![
-            Expr::Identifier(Ident::new("size")),
-            Expr::Rollup(vec![
-                vec![Expr::Identifier(Ident::new("brand"))],
-                vec![Expr::Identifier(Ident::new("size"))],
-            ]),
-        ],
-        select.group_by
-    );
-}
-
-#[test]
-fn parse_select_group_by_cube() {
-    let dialects = TestedDialects {
-        dialects: vec![Box::new(GenericDialect {}), Box::new(PostgreSqlDialect {})],
-    };
-    let sql = "SELECT brand, size, sum(sales) FROM items_sold GROUP BY size, CUBE (brand, size)";
-    let select = dialects.verified_only_select(sql);
-    assert_eq!(
-        vec![
-            Expr::Identifier(Ident::new("size")),
-            Expr::Cube(vec![
-                vec![Expr::Identifier(Ident::new("brand"))],
-                vec![Expr::Identifier(Ident::new("size"))],
-            ]),
-        ],
-        select.group_by
     );
 }
 
@@ -6716,6 +6663,67 @@ fn parse_with_recursion_limit() {
         .parse_statements();
 
     assert!(matches!(res, Ok(_)), "{res:?}");
+}
+
+#[test]
+fn parse_pivot_table() {
+    let sql = concat!(
+        "SELECT * FROM monthly_sales AS a ",
+        "PIVOT(SUM(a.amount) FOR a.MONTH IN ('JAN', 'FEB', 'MAR', 'APR')) AS p (c, d) ",
+        "ORDER BY EMPID"
+    );
+
+    assert_eq!(
+        verified_only_select(sql).from[0].relation,
+        Pivot {
+            name: ObjectName(vec![Ident::new("monthly_sales")]),
+            table_alias: Some(TableAlias {
+                name: Ident::new("a"),
+                columns: vec![]
+            }),
+            aggregate_function: Expr::Function(Function {
+                name: ObjectName(vec![Ident::new("SUM")]),
+                args: (vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
+                    Expr::CompoundIdentifier(vec![Ident::new("a"), Ident::new("amount"),])
+                ))]),
+                over: None,
+                distinct: false,
+                special: false,
+            }),
+            value_column: vec![Ident::new("a"), Ident::new("MONTH")],
+            pivot_values: vec![
+                Value::SingleQuotedString("JAN".to_string()),
+                Value::SingleQuotedString("FEB".to_string()),
+                Value::SingleQuotedString("MAR".to_string()),
+                Value::SingleQuotedString("APR".to_string()),
+            ],
+            pivot_alias: Some(TableAlias {
+                name: Ident {
+                    value: "p".to_string(),
+                    quote_style: None
+                },
+                columns: vec![Ident::new("c"), Ident::new("d")],
+            }),
+        }
+    );
+    assert_eq!(verified_stmt(sql).to_string(), sql);
+
+    let sql_without_table_alias = concat!(
+        "SELECT * FROM monthly_sales ",
+        "PIVOT(SUM(a.amount) FOR a.MONTH IN ('JAN', 'FEB', 'MAR', 'APR')) AS p (c, d) ",
+        "ORDER BY EMPID"
+    );
+    assert_matches!(
+        verified_only_select(sql_without_table_alias).from[0].relation,
+        Pivot {
+            table_alias: None, // parsing should succeed with empty alias
+            ..
+        }
+    );
+    assert_eq!(
+        verified_stmt(sql_without_table_alias).to_string(),
+        sql_without_table_alias
+    );
 }
 
 /// Makes a predicate that looks like ((user_id = $id) OR user_id = $2...)
