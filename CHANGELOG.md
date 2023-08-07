@@ -8,6 +8,77 @@ Given that the parser produces a typed AST, any changes to the AST will technica
 ## [Unreleased]
 Check https://github.com/sqlparser-rs/sqlparser-rs/commits/main for undocumented changes.
 
+## [0.36.1] 2023-07-19
+
+### Fixed
+* Fix parsing of identifiers after '%' symbol (#927) - Thanks @alamb
+
+## [0.36.0] 2023-07-19
+
+### Added
+* Support toggling "unescape" mode to retain original escaping (#870)  - Thanks @canalun
+* Support UNION (ALL) BY NAME syntax (#915) - Thanks @parkma99
+* Add doc comment for all operators (#917) - Thanks @izveigor
+* Support `PGOverlap` operator (#912) - Thanks @izveigor
+* Support multi args for unnest (#909) - Thanks  @jayzhan211
+* Support `ALTER VIEW`, MySQL syntax (#907) - Thanks  @liadgiladi
+* Add DeltaLake keywords (#906) - Thanks @roeap
+
+### Fixed
+* Parse JsonOperators correctly (#913) - Thanks @izveigor
+* Fix dependabot by removing rust-toolchain toml (#922) - Thanks @alamb
+
+### Changed
+* Clean up JSON operator tokenizing code (#923) - Thanks @alamb
+* Upgrade bigdecimal to 0.4.1 (#921) - Thanks @jinlee0
+* Remove most instances of #[cfg(feature(bigdecimal))] in tests (#910) - Thanks @alamb
+
+## [0.35.0] 2023-06-23
+
+### Added
+* Support `CREATE PROCEDURE` of MSSQL (#900) - Thanks  @delsehi
+* Support DuckDB's `CREATE MACRO` statements (#897) - Thanks @MartinNowak
+* Support for `CREATE TYPE (AS)` statements (#888) - Thanks @srijs
+* Support `STRICT` tables of sqlite (#903) - Thanks @parkma99
+
+### Fixed
+* Fixed precedence of unary negation operator with operators: Mul, Div and Mod (#902) - Thanks  @izveigor
+
+### Changed
+* Add `support_group_by_expr` to `Dialect` trait (#896) - Thanks @jdye64
+* Update criterion requirement from `0.4` to `0.5` in `/sqlparser_bench` (#890) - Thanks @dependabot (!!)
+
+## [0.34.0] 2023-05-19
+
+### Added
+
+* Support named window frames (#881)  - Thanks @berkaysynnada, @mustafasrepo, and @ozankabak
+* Support for `ORDER BY` clauses in aggregate functions (#882)  - Thanks @mustafasrepo
+* Support `DuckDB` dialect (#878) - Thanks @eitsupi
+* Support optional `TABLE` keyword for `TRUNCATE TABLE` (#883) - Thanks @mobuchowski
+* Support MySQL's `DIV` operator (#876) - Thanks @eitsupi
+* Support Custom operators (#868) - Thanks @max-sixty
+* Add `Parser::parse_multipart_identifier`  (#860) - Thanks @Jefffrey
+* Support for multiple expressions, order by in `ARRAY_AGG` (#879) - Thanks @mustafasrepo
+* Support for query source in `COPY .. TO` statement (#858) - Thanks @aprimadi
+* Support `DISTINCT ON (...)` (#852) - Thanks @aljazerzen
+* Support multiple-table `DELETE` syntax (#855) - Thanks @AviRaboah
+* Support `COPY INTO` in `SnowflakeDialect` (#841) - Thanks @pawel-big-lebowski
+* Support identifiers beginning with digits in MySQL (#856) - Thanks @AviRaboah
+
+### Changed
+* Include license file in published crate (#871) - Thanks @ankane
+* Make `Expr::Interval` its own struct (#872) - Thanks @aprimadi
+* Add dialect_from_str and improve Dialect documentation (#848) - Thanks @alamb
+* Add clickhouse to example (#849) - Thanks @anglinb
+
+### Fixed
+* Fix merge conflict (#885) - Thanks @alamb
+* Fix tiny typo in custom_sql_parser.md (#864) - Thanks @okue
+* Fix logical merge conflict (#865) - Thanks @alamb
+* Test trailing commas (#859) - Thanks @aljazerzen
+
+
 ## [0.33.0] 2023-04-10
 
 ### Added

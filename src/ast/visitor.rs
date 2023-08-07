@@ -480,7 +480,7 @@ where
 ///     *expr = Expr::Function(Function {
 ///           name: ObjectName(vec![Ident::new("f")]),
 ///           args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(old_expr))],
-///           over: None, distinct: false, special: false,
+///           over: None, distinct: false, special: false, order_by: vec![],
 ///      });
 ///   }
 ///   ControlFlow::<()>::Continue(())
@@ -632,8 +632,7 @@ mod tests {
 
     fn do_visit(sql: &str) -> Vec<String> {
         let dialect = GenericDialect {};
-        let mut tokenizer = Tokenizer::new(&dialect, sql);
-        let tokens = tokenizer.tokenize().unwrap();
+        let tokens = Tokenizer::new(&dialect, sql).tokenize().unwrap();
         let s = Parser::new(&dialect)
             .with_tokens(tokens)
             .parse_statement()

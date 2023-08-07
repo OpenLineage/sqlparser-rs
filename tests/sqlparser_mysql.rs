@@ -18,6 +18,7 @@ use sqlparser::ast::Expr;
 use sqlparser::ast::Value;
 use sqlparser::ast::*;
 use sqlparser::dialect::{GenericDialect, MySqlDialect};
+use sqlparser::parser::ParserOptions;
 use sqlparser::tokenizer::Token;
 use test_utils::*;
 
@@ -259,13 +260,7 @@ fn parse_set_variables() {
             local: true,
             hivevar: false,
             variable: ObjectName(vec!["autocommit".into()]),
-            value: vec![Expr::Value(Value::Number(
-                #[cfg(not(feature = "bigdecimal"))]
-                "1".to_string(),
-                #[cfg(feature = "bigdecimal")]
-                bigdecimal::BigDecimal::from(1),
-                false
-            ))],
+            value: vec![Expr::Value(number("1"))],
         }
     );
 }
@@ -438,14 +433,18 @@ fn parse_quote_identifiers() {
 }
 
 #[test]
-fn parse_quote_identifiers_2() {
+fn parse_escaped_quote_identifiers_with_escape() {
     let sql = "SELECT `quoted `` identifier`";
     assert_eq!(
-        mysql().verified_stmt(sql),
+        TestedDialects {
+            dialects: vec![Box::new(MySqlDialect {})],
+            options: None,
+        }
+        .verified_stmt(sql),
         Statement::Query(Box::new(Query {
             with: None,
             body: Box::new(SetExpr::Select(Box::new(Select {
-                distinct: false,
+                distinct: None,
                 top: None,
                 projection: vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident {
                     value: "quoted ` identifier".into(),
@@ -460,6 +459,7 @@ fn parse_quote_identifiers_2() {
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
+                named_window: vec![],
                 qualify: None
             }))),
             order_by: vec![],
@@ -472,14 +472,60 @@ fn parse_quote_identifiers_2() {
 }
 
 #[test]
-fn parse_quote_identifiers_3() {
-    let sql = "SELECT ```quoted identifier```";
+fn parse_escaped_quote_identifiers_with_no_escape() {
+    let sql = "SELECT `quoted `` identifier`";
     assert_eq!(
-        mysql().verified_stmt(sql),
+        TestedDialects {
+            dialects: vec![Box::new(MySqlDialect {})],
+            options: Some(ParserOptions {
+                trailing_commas: false,
+                unescape: false,
+            }),
+        }
+        .verified_stmt(sql),
         Statement::Query(Box::new(Query {
             with: None,
             body: Box::new(SetExpr::Select(Box::new(Select {
-                distinct: false,
+                distinct: None,
+                top: None,
+                projection: vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident {
+                    value: "quoted `` identifier".into(),
+                    quote_style: Some('`'),
+                }))],
+                into: None,
+                from: vec![],
+                lateral_views: vec![],
+                selection: None,
+                group_by: vec![],
+                cluster_by: vec![],
+                distribute_by: vec![],
+                sort_by: vec![],
+                having: None,
+                named_window: vec![],
+                qualify: None
+            }))),
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            fetch: None,
+            locks: vec![],
+        }))
+    );
+}
+
+#[test]
+fn parse_escaped_backticks_with_escape() {
+    let sql = "SELECT ```quoted identifier```";
+    assert_eq!(
+        TestedDialects {
+            dialects: vec![Box::new(MySqlDialect {})],
+            options: None,
+        }
+        .verified_stmt(sql),
+        Statement::Query(Box::new(Query {
+            with: None,
+            body: Box::new(SetExpr::Select(Box::new(Select {
+                distinct: None,
                 top: None,
                 projection: vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident {
                     value: "`quoted identifier`".into(),
@@ -494,6 +540,46 @@ fn parse_quote_identifiers_3() {
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
+                named_window: vec![],
+                qualify: None
+            }))),
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            fetch: None,
+            locks: vec![],
+        }))
+    );
+}
+
+#[test]
+fn parse_escaped_backticks_with_no_escape() {
+    let sql = "SELECT ```quoted identifier```";
+    assert_eq!(
+        TestedDialects {
+            dialects: vec![Box::new(MySqlDialect {})],
+            options: Some(ParserOptions::new().with_unescape(false)),
+        }
+        .verified_stmt(sql),
+        Statement::Query(Box::new(Query {
+            with: None,
+            body: Box::new(SetExpr::Select(Box::new(Select {
+                distinct: None,
+                top: None,
+                projection: vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident {
+                    value: "``quoted identifier``".into(),
+                    quote_style: Some('`'),
+                }))],
+                into: None,
+                from: vec![],
+                lateral_views: vec![],
+                selection: None,
+                group_by: vec![],
+                cluster_by: vec![],
+                distribute_by: vec![],
+                sort_by: vec![],
+                having: None,
+                named_window: vec![],
                 qualify: None
             }))),
             order_by: vec![],
@@ -517,9 +603,13 @@ fn parse_unterminated_escape() {
 }
 
 #[test]
-fn parse_escaped_string() {
+fn parse_escaped_string_with_escape() {
     fn assert_mysql_query_value(sql: &str, quoted: &str) {
-        let stmt = mysql().one_statement_parses_to(sql, "");
+        let stmt = TestedDialects {
+            dialects: vec![Box::new(MySqlDialect {})],
+            options: None,
+        }
+        .one_statement_parses_to(sql, "");
 
         match stmt {
             Statement::Query(query) => match *query.body {
@@ -546,6 +636,95 @@ fn parse_escaped_string() {
 
     let sql = r#"SELECT 'Testing: \0 \\ \% \_ \b \n \r \t \Z \a \ '"#;
     assert_mysql_query_value(sql, "Testing: \0 \\ % _ \u{8} \n \r \t \u{1a} a  ");
+}
+
+#[test]
+fn parse_escaped_string_with_no_escape() {
+    fn assert_mysql_query_value(sql: &str, quoted: &str) {
+        let stmt = TestedDialects {
+            dialects: vec![Box::new(MySqlDialect {})],
+            options: Some(ParserOptions::new().with_unescape(false)),
+        }
+        .one_statement_parses_to(sql, "");
+
+        match stmt {
+            Statement::Query(query) => match *query.body {
+                SetExpr::Select(value) => {
+                    let expr = expr_from_projection(only(&value.projection));
+                    assert_eq!(
+                        *expr,
+                        Expr::Value(Value::SingleQuotedString(quoted.to_string()))
+                    );
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+    }
+    let sql = r#"SELECT 'I\'m fine'"#;
+    assert_mysql_query_value(sql, r#"I\'m fine"#);
+
+    let sql = r#"SELECT 'I''m fine'"#;
+    assert_mysql_query_value(sql, r#"I''m fine"#);
+
+    let sql = r#"SELECT 'I\"m fine'"#;
+    assert_mysql_query_value(sql, r#"I\"m fine"#);
+
+    let sql = r#"SELECT 'Testing: \0 \\ \% \_ \b \n \r \t \Z \a \ '"#;
+    assert_mysql_query_value(sql, r#"Testing: \0 \\ \% \_ \b \n \r \t \Z \a \ "#);
+}
+
+#[test]
+fn check_roundtrip_of_escaped_string() {
+    let options = Some(ParserOptions::new().with_unescape(false));
+
+    TestedDialects {
+        dialects: vec![Box::new(MySqlDialect {})],
+        options: options.clone(),
+    }
+    .verified_stmt(r#"SELECT 'I\'m fine'"#);
+    TestedDialects {
+        dialects: vec![Box::new(MySqlDialect {})],
+        options: options.clone(),
+    }
+    .verified_stmt(r#"SELECT 'I''m fine'"#);
+    TestedDialects {
+        dialects: vec![Box::new(MySqlDialect {})],
+        options: options.clone(),
+    }
+    .verified_stmt(r#"SELECT 'I\\\'m fine'"#);
+    TestedDialects {
+        dialects: vec![Box::new(MySqlDialect {})],
+        options: options.clone(),
+    }
+    .verified_stmt(r#"SELECT 'I\\\'m fine'"#);
+
+    TestedDialects {
+        dialects: vec![Box::new(MySqlDialect {})],
+        options: options.clone(),
+    }
+    .verified_stmt(r#"SELECT "I\"m fine""#);
+    TestedDialects {
+        dialects: vec![Box::new(MySqlDialect {})],
+        options: options.clone(),
+    }
+    .verified_stmt(r#"SELECT "I""m fine""#);
+    TestedDialects {
+        dialects: vec![Box::new(MySqlDialect {})],
+        options: options.clone(),
+    }
+    .verified_stmt(r#"SELECT "I\\\"m fine""#);
+    TestedDialects {
+        dialects: vec![Box::new(MySqlDialect {})],
+        options: options.clone(),
+    }
+    .verified_stmt(r#"SELECT "I\\\"m fine""#);
+
+    TestedDialects {
+        dialects: vec![Box::new(MySqlDialect {})],
+        options,
+    }
+    .verified_stmt(r#"SELECT "I'm ''fine''""#);
 }
 
 #[test]
@@ -641,7 +820,6 @@ fn parse_create_table_unsigned() {
 }
 
 #[test]
-#[cfg(not(feature = "bigdecimal"))]
 fn parse_simple_insert() {
     let sql = r"INSERT INTO tasks (title, priority) VALUES ('Test Some Inserts', 1), ('Test Entry 2', 2), ('Test Entry 3', 3)";
 
@@ -666,15 +844,15 @@ fn parse_simple_insert() {
                                 Expr::Value(Value::SingleQuotedString(
                                     "Test Some Inserts".to_string()
                                 )),
-                                Expr::Value(Value::Number("1".to_string(), false))
+                                Expr::Value(number("1"))
                             ],
                             vec![
                                 Expr::Value(Value::SingleQuotedString("Test Entry 2".to_string())),
-                                Expr::Value(Value::Number("2".to_string(), false))
+                                Expr::Value(number("2"))
                             ],
                             vec![
                                 Expr::Value(Value::SingleQuotedString("Test Entry 3".to_string())),
-                                Expr::Value(Value::Number("3".to_string(), false))
+                                Expr::Value(number("3"))
                             ]
                         ]
                     })),
@@ -791,6 +969,7 @@ fn parse_insert_with_on_duplicate_update() {
                             over: None,
                             distinct: false,
                             special: false,
+                            order_by: vec![],
                         })
                     },
                     Assignment {
@@ -803,6 +982,7 @@ fn parse_insert_with_on_duplicate_update() {
                             over: None,
                             distinct: false,
                             special: false,
+                            order_by: vec![],
                         })
                     },
                     Assignment {
@@ -815,6 +995,7 @@ fn parse_insert_with_on_duplicate_update() {
                             over: None,
                             distinct: false,
                             special: false,
+                            order_by: vec![],
                         })
                     },
                     Assignment {
@@ -827,6 +1008,7 @@ fn parse_insert_with_on_duplicate_update() {
                             over: None,
                             distinct: false,
                             special: false,
+                            order_by: vec![],
                         })
                     },
                     Assignment {
@@ -839,11 +1021,118 @@ fn parse_insert_with_on_duplicate_update() {
                             over: None,
                             distinct: false,
                             special: false,
+                            order_by: vec![],
                         })
                     },
                 ])),
                 on
             );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_select_with_numeric_prefix_column_name() {
+    let sql = "SELECT 123col_$@123abc FROM \"table\"";
+    match mysql().verified_stmt(sql) {
+        Statement::Query(q) => {
+            assert_eq!(
+                q.body,
+                Box::new(SetExpr::Select(Box::new(Select {
+                    distinct: None,
+                    top: None,
+                    projection: vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(
+                        "123col_$@123abc"
+                    )))],
+                    into: None,
+                    from: vec![TableWithJoins {
+                        relation: TableFactor::Table {
+                            name: ObjectName(vec![Ident::with_quote('"', "table")]),
+                            alias: None,
+                            args: None,
+                            with_hints: vec![],
+                        },
+                        joins: vec![]
+                    }],
+                    lateral_views: vec![],
+                    selection: None,
+                    group_by: vec![],
+                    cluster_by: vec![],
+                    distribute_by: vec![],
+                    sort_by: vec![],
+                    having: None,
+                    named_window: vec![],
+                    qualify: None,
+                })))
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+// Don't run with bigdecimal as it fails like this on rust beta:
+//
+// 'parse_select_with_concatenation_of_exp_number_and_numeric_prefix_column'
+// panicked at 'assertion failed: `(left == right)`
+//
+//  left: `"SELECT 123e4, 123col_$@123abc FROM \"table\""`,
+//  right: `"SELECT 1230000, 123col_$@123abc FROM \"table\""`', src/test_utils.rs:114:13
+#[cfg(not(feature = "bigdecimal"))]
+#[test]
+fn parse_select_with_concatenation_of_exp_number_and_numeric_prefix_column() {
+    let sql = "SELECT 123e4, 123col_$@123abc FROM \"table\"";
+    match mysql().verified_stmt(sql) {
+        Statement::Query(q) => {
+            assert_eq!(
+                q.body,
+                Box::new(SetExpr::Select(Box::new(Select {
+                    distinct: None,
+                    top: None,
+                    projection: vec![
+                        SelectItem::UnnamedExpr(Expr::Value(number("123e4"))),
+                        SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("123col_$@123abc")))
+                    ],
+                    into: None,
+                    from: vec![TableWithJoins {
+                        relation: TableFactor::Table {
+                            name: ObjectName(vec![Ident::with_quote('"', "table")]),
+                            alias: None,
+                            args: None,
+                            with_hints: vec![],
+                        },
+                        joins: vec![]
+                    }],
+                    lateral_views: vec![],
+                    selection: None,
+                    group_by: vec![],
+                    cluster_by: vec![],
+                    distribute_by: vec![],
+                    sort_by: vec![],
+                    having: None,
+                    named_window: vec![],
+                    qualify: None,
+                })))
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_insert_with_numeric_prefix_column_name() {
+    let sql = "INSERT INTO s1.t1 (123col_$@length123) VALUES (67.654)";
+    match mysql().verified_stmt(sql) {
+        Statement::Insert {
+            table_name,
+            columns,
+            ..
+        } => {
+            assert_eq!(
+                ObjectName(vec![Ident::new("s1"), Ident::new("t1")]),
+                table_name
+            );
+            assert_eq!(vec![Ident::new("123col_$@length123")], columns);
         }
         _ => unreachable!(),
     }
@@ -963,7 +1252,6 @@ fn parse_alter_table_change_column() {
 }
 
 #[test]
-#[cfg(not(feature = "bigdecimal"))]
 fn parse_substring_in_select() {
     let sql = "SELECT DISTINCT SUBSTRING(description, 0, 1) FROM test";
     match mysql().one_statement_parses_to(
@@ -975,21 +1263,15 @@ fn parse_substring_in_select() {
                 Box::new(Query {
                     with: None,
                     body: Box::new(SetExpr::Select(Box::new(Select {
-                        distinct: true,
+                        distinct: Some(Distinct::Distinct),
                         top: None,
                         projection: vec![SelectItem::UnnamedExpr(Expr::Substring {
                             expr: Box::new(Expr::Identifier(Ident {
                                 value: "description".to_string(),
                                 quote_style: None
                             })),
-                            substring_from: Some(Box::new(Expr::Value(Value::Number(
-                                "0".to_string(),
-                                false
-                            )))),
-                            substring_for: Some(Box::new(Expr::Value(Value::Number(
-                                "1".to_string(),
-                                false
-                            ))))
+                            substring_from: Some(Box::new(Expr::Value(number("0")))),
+                            substring_for: Some(Box::new(Expr::Value(number("1"))))
                         })],
                         into: None,
                         from: vec![TableWithJoins {
@@ -1011,6 +1293,7 @@ fn parse_substring_in_select() {
                         distribute_by: vec![],
                         sort_by: vec![],
                         having: None,
+                        named_window: vec![],
                         qualify: None
                     }))),
                     order_by: vec![],
@@ -1082,6 +1365,7 @@ fn parse_table_colum_option_on_update() {
                             over: None,
                             distinct: false,
                             special: false,
+                            order_by: vec![],
                         })),
                     },],
                 }],
@@ -1250,12 +1534,14 @@ fn parse_create_table_with_fulltext_definition_should_not_accept_constraint_name
 fn mysql() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(MySqlDialect {})],
+        options: None,
     }
 }
 
 fn mysql_and_generic() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(MySqlDialect {}), Box::new(GenericDialect {})],
+        options: None,
     }
 }
 
@@ -1272,7 +1558,7 @@ fn parse_hex_string_introducer() {
         Statement::Query(Box::new(Query {
             with: None,
             body: Box::new(SetExpr::Select(Box::new(Select {
-                distinct: false,
+                distinct: None,
                 top: None,
                 projection: vec![SelectItem::UnnamedExpr(Expr::IntroducedString {
                     introducer: "_latin1".to_string(),
@@ -1286,6 +1572,7 @@ fn parse_hex_string_introducer() {
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
+                named_window: vec![],
                 qualify: None,
                 into: None
             }))),
@@ -1304,4 +1591,9 @@ fn parse_string_introducers() {
     mysql().one_statement_parses_to("SELECT _utf8'abc'", "SELECT _utf8 'abc'");
     mysql().one_statement_parses_to("SELECT _utf8mb4'abc'", "SELECT _utf8mb4 'abc'");
     mysql().verified_stmt("SELECT _binary 'abc', _utf8mb4 'abc'");
+}
+
+#[test]
+fn parse_div_infix() {
+    mysql().verified_stmt(r#"SELECT 5 DIV 2"#);
 }

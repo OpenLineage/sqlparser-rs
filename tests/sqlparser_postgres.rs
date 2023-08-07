@@ -691,8 +691,10 @@ fn test_copy_from() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: false,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -707,8 +709,10 @@ fn test_copy_from() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: false,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -723,8 +727,10 @@ fn test_copy_from() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: false,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -745,8 +751,10 @@ fn test_copy_to() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: true,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -761,8 +769,10 @@ fn test_copy_to() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: true,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -777,8 +787,10 @@ fn test_copy_to() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: true,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -816,8 +828,10 @@ fn parse_copy_from() {
     assert_eq!(
         pg_and_generic().one_statement_parses_to(sql, ""),
         Statement::Copy {
-            table_name: ObjectName(vec!["table".into()]),
-            columns: vec!["a".into(), "b".into()],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["table".into()]),
+                columns: vec!["a".into(), "b".into()],
+            },
             to: false,
             target: CopyTarget::File {
                 filename: "file.csv".into()
@@ -846,13 +860,24 @@ fn parse_copy_from() {
 }
 
 #[test]
+fn parse_copy_from_error() {
+    let res = pg().parse_sql_statements("COPY (SELECT 42 AS a, 'hello' AS b) FROM 'query.csv'");
+    assert_eq!(
+        ParserError::ParserError("COPY ... FROM does not support query as a source".to_string()),
+        res.unwrap_err()
+    );
+}
+
+#[test]
 fn parse_copy_to() {
     let stmt = pg().verified_stmt("COPY users TO 'data.csv'");
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: true,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -867,8 +892,10 @@ fn parse_copy_to() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["country".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["country".into()]),
+                columns: vec![],
+            },
             to: true,
             target: CopyTarget::Stdout,
             options: vec![CopyOption::Delimiter('|')],
@@ -882,8 +909,10 @@ fn parse_copy_to() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["country".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["country".into()]),
+                columns: vec![],
+            },
             to: true,
             target: CopyTarget::Program {
                 command: "gzip > /usr1/proj/bray/sql/country_data.gz".into(),
@@ -893,6 +922,59 @@ fn parse_copy_to() {
             values: vec![],
         }
     );
+
+    let stmt = pg().verified_stmt("COPY (SELECT 42 AS a, 'hello' AS b) TO 'query.csv'");
+    assert_eq!(
+        stmt,
+        Statement::Copy {
+            source: CopySource::Query(Box::new(Query {
+                with: None,
+                body: Box::new(SetExpr::Select(Box::new(Select {
+                    distinct: None,
+                    top: None,
+                    projection: vec![
+                        SelectItem::ExprWithAlias {
+                            expr: Expr::Value(number("42")),
+                            alias: Ident {
+                                value: "a".into(),
+                                quote_style: None,
+                            },
+                        },
+                        SelectItem::ExprWithAlias {
+                            expr: Expr::Value(Value::SingleQuotedString("hello".into())),
+                            alias: Ident {
+                                value: "b".into(),
+                                quote_style: None,
+                            },
+                        }
+                    ],
+                    into: None,
+                    from: vec![],
+                    lateral_views: vec![],
+                    selection: None,
+                    group_by: vec![],
+                    having: None,
+                    named_window: vec![],
+                    cluster_by: vec![],
+                    distribute_by: vec![],
+                    sort_by: vec![],
+                    qualify: None,
+                }))),
+                order_by: vec![],
+                limit: None,
+                offset: None,
+                fetch: None,
+                locks: vec![],
+            })),
+            to: true,
+            target: CopyTarget::File {
+                filename: "query.csv".into(),
+            },
+            options: vec![],
+            legacy_options: vec![],
+            values: vec![],
+        }
+    )
 }
 
 #[test]
@@ -901,8 +983,10 @@ fn parse_copy_from_before_v9_0() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: false,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -928,8 +1012,10 @@ fn parse_copy_from_before_v9_0() {
     assert_eq!(
         pg_and_generic().one_statement_parses_to(sql, ""),
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: false,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -954,8 +1040,10 @@ fn parse_copy_to_before_v9_0() {
     assert_eq!(
         stmt,
         Statement::Copy {
-            table_name: ObjectName(vec!["users".into()]),
-            columns: vec![],
+            source: CopySource::Table {
+                table_name: ObjectName(vec!["users".into()]),
+                columns: vec![],
+            },
             to: true,
             target: CopyTarget::File {
                 filename: "data.csv".to_string(),
@@ -1011,13 +1099,7 @@ fn parse_set() {
             local: false,
             hivevar: false,
             variable: ObjectName(vec![Ident::new("a")]),
-            value: vec![Expr::Value(Value::Number(
-                #[cfg(not(feature = "bigdecimal"))]
-                "0".to_string(),
-                #[cfg(feature = "bigdecimal")]
-                bigdecimal::BigDecimal::from(0),
-                false,
-            ))],
+            value: vec![Expr::Value(number("0"))],
         }
     );
 
@@ -1525,6 +1607,7 @@ fn parse_pg_binary_ops() {
         ("^", BinaryOperator::PGExp, pg()),
         (">>", BinaryOperator::PGBitwiseShiftRight, pg_and_generic()),
         ("<<", BinaryOperator::PGBitwiseShiftLeft, pg_and_generic()),
+        ("&&", BinaryOperator::PGOverlap, pg()),
     ];
 
     for (str_op, op, dialects) in binary_ops {
@@ -1602,13 +1685,8 @@ fn parse_pg_regex_match_ops() {
 
 #[test]
 fn parse_array_index_expr() {
-    #[cfg(feature = "bigdecimal")]
     let num: Vec<Expr> = (0..=10)
-        .map(|s| Expr::Value(Value::Number(bigdecimal::BigDecimal::from(s), false)))
-        .collect();
-    #[cfg(not(feature = "bigdecimal"))]
-    let num: Vec<Expr> = (0..=10)
-        .map(|s| Expr::Value(Value::Number(s.to_string(), false)))
+        .map(|s| Expr::Value(number(&s.to_string())))
         .collect();
 
     let sql = "SELECT foo[0] FROM foos";
@@ -1694,15 +1772,9 @@ fn parse_array_subquery_expr() {
                 op: SetOperator::Union,
                 set_quantifier: SetQuantifier::None,
                 left: Box::new(SetExpr::Select(Box::new(Select {
-                    distinct: false,
+                    distinct: None,
                     top: None,
-                    projection: vec![SelectItem::UnnamedExpr(Expr::Value(Value::Number(
-                        #[cfg(not(feature = "bigdecimal"))]
-                        "1".to_string(),
-                        #[cfg(feature = "bigdecimal")]
-                        bigdecimal::BigDecimal::from(1),
-                        false,
-                    )))],
+                    projection: vec![SelectItem::UnnamedExpr(Expr::Value(number("1")))],
                     into: None,
                     from: vec![],
                     lateral_views: vec![],
@@ -1712,18 +1784,13 @@ fn parse_array_subquery_expr() {
                     distribute_by: vec![],
                     sort_by: vec![],
                     having: None,
+                    named_window: vec![],
                     qualify: None,
                 }))),
                 right: Box::new(SetExpr::Select(Box::new(Select {
-                    distinct: false,
+                    distinct: None,
                     top: None,
-                    projection: vec![SelectItem::UnnamedExpr(Expr::Value(Value::Number(
-                        #[cfg(not(feature = "bigdecimal"))]
-                        "2".to_string(),
-                        #[cfg(feature = "bigdecimal")]
-                        bigdecimal::BigDecimal::from(2),
-                        false,
-                    )))],
+                    projection: vec![SelectItem::UnnamedExpr(Expr::Value(number("2")))],
                     into: None,
                     from: vec![],
                     lateral_views: vec![],
@@ -1733,6 +1800,7 @@ fn parse_array_subquery_expr() {
                     distribute_by: vec![],
                     sort_by: vec![],
                     having: None,
+                    named_window: vec![],
                     qualify: None,
                 }))),
             }),
@@ -1930,10 +1998,6 @@ fn test_composite_value() {
         select.projection[0]
     );
 
-    #[cfg(feature = "bigdecimal")]
-    let num: Expr = Expr::Value(Value::Number(bigdecimal::BigDecimal::from(9), false));
-    #[cfg(not(feature = "bigdecimal"))]
-    let num: Expr = Expr::Value(Value::Number("9".to_string(), false));
     assert_eq!(
         select.selection,
         Some(Expr::BinaryOp {
@@ -1945,7 +2009,7 @@ fn test_composite_value() {
                 ]))))
             }),
             op: BinaryOperator::Gt,
-            right: Box::new(num)
+            right: Box::new(Expr::Value(number("9")))
         })
     );
 
@@ -1970,7 +2034,8 @@ fn test_composite_value() {
                 )))],
                 over: None,
                 distinct: false,
-                special: false
+                special: false,
+                order_by: vec![],
             }))))
         }),
         select.projection[0]
@@ -2052,12 +2117,14 @@ fn parse_on_commit() {
 fn pg() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(PostgreSqlDialect {})],
+        options: None,
     }
 }
 
 fn pg_and_generic() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(PostgreSqlDialect {}), Box::new(GenericDialect {})],
+        options: None,
     }
 }
 
@@ -2130,6 +2197,7 @@ fn parse_current_functions() {
             over: None,
             distinct: false,
             special: true,
+            order_by: vec![],
         }),
         expr_from_projection(&select.projection[0])
     );
@@ -2140,6 +2208,7 @@ fn parse_current_functions() {
             over: None,
             distinct: false,
             special: true,
+            order_by: vec![],
         }),
         expr_from_projection(&select.projection[1])
     );
@@ -2150,6 +2219,7 @@ fn parse_current_functions() {
             over: None,
             distinct: false,
             special: true,
+            order_by: vec![],
         }),
         expr_from_projection(&select.projection[2])
     );
@@ -2160,6 +2230,7 @@ fn parse_current_functions() {
             over: None,
             distinct: false,
             special: true,
+            order_by: vec![],
         }),
         expr_from_projection(&select.projection[3])
     );
@@ -2310,7 +2381,7 @@ fn parse_create_role() {
                 in_role,
                 in_group,
                 role,
-                user,
+                user: _,
                 admin,
                 authorization_owner,
             }],
@@ -2338,7 +2409,6 @@ fn parse_create_role() {
             assert_eq_vec(&["role1", "role2"], in_role);
             assert!(in_group.is_empty());
             assert_eq_vec(&["role3"], role);
-            assert!(user.is_empty());
             assert_eq_vec(&["role4", "role5"], admin);
             assert_eq!(*authorization_owner, None);
         }
@@ -2414,6 +2484,7 @@ fn parse_delimited_identifiers() {
             over: None,
             distinct: false,
             special: false,
+            order_by: vec![],
         }),
         expr_from_projection(&select.projection[1]),
     );
@@ -2860,4 +2931,88 @@ fn parse_select_group_by_cube() {
         ],
         select.group_by
     );
+}
+
+#[test]
+fn parse_truncate() {
+    let truncate = pg_and_generic().verified_stmt("TRUNCATE db.table_name");
+    assert_eq!(
+        Statement::Truncate {
+            table_name: ObjectName(vec![Ident::new("db"), Ident::new("table_name")]),
+            partitions: None,
+            table: false
+        },
+        truncate
+    );
+}
+
+#[test]
+fn parse_create_table_with_alias() {
+    let sql = "CREATE TABLE public.datatype_aliases
+    (
+      int8_col INT8,
+      int4_col INT4,
+      int2_col INT2,
+      float8_col FLOAT8,
+      float4_col FLOAT4,
+      bool_col BOOL,
+    );";
+    match pg_and_generic().one_statement_parses_to(sql, "") {
+        Statement::CreateTable {
+            name,
+            columns,
+            constraints,
+            with_options: _with_options,
+            if_not_exists: false,
+            external: false,
+            file_format: None,
+            location: None,
+            ..
+        } => {
+            assert_eq!("public.datatype_aliases", name.to_string());
+            assert_eq!(
+                columns,
+                vec![
+                    ColumnDef {
+                        name: "int8_col".into(),
+                        data_type: DataType::Int8(None),
+                        collation: None,
+                        options: vec![]
+                    },
+                    ColumnDef {
+                        name: "int4_col".into(),
+                        data_type: DataType::Int4(None),
+                        collation: None,
+                        options: vec![]
+                    },
+                    ColumnDef {
+                        name: "int2_col".into(),
+                        data_type: DataType::Int2(None),
+                        collation: None,
+                        options: vec![]
+                    },
+                    ColumnDef {
+                        name: "float8_col".into(),
+                        data_type: DataType::FLOAT8,
+                        collation: None,
+                        options: vec![]
+                    },
+                    ColumnDef {
+                        name: "float4_col".into(),
+                        data_type: DataType::FLOAT4,
+                        collation: None,
+                        options: vec![]
+                    },
+                    ColumnDef {
+                        name: "bool_col".into(),
+                        data_type: DataType::Bool,
+                        collation: None,
+                        options: vec![]
+                    },
+                ]
+            );
+            assert!(constraints.is_empty());
+        }
+        _ => unreachable!(),
+    }
 }

@@ -45,6 +45,8 @@ $ cargo run --feature json_example --example cli FILENAME.sql [--dialectname]
         "--snowflake" => Box::new(SnowflakeDialect {}),
         "--hive" => Box::new(HiveDialect {}),
         "--redshift" => Box::new(RedshiftSqlDialect {}),
+        "--clickhouse" => Box::new(ClickHouseDialect {}),
+        "--duckdb" => Box::new(DuckDbDialect {}),
         "--generic" | "" => Box::new(GenericDialect {}),
         s => panic!("Unexpected parameter: {s}"),
     };

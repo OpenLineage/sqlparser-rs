@@ -26,17 +26,27 @@ use alloc::{
 };
 use core::fmt::Debug;
 
-use crate::ast::*;
 use crate::dialect::*;
 use crate::parser::{Parser, ParserError};
+use crate::{ast::*, parser::ParserOptions};
 
 /// Tests use the methods on this struct to invoke the parser on one or
 /// multiple dialects.
 pub struct TestedDialects {
     pub dialects: Vec<Box<dyn Dialect>>,
+    pub options: Option<ParserOptions>,
 }
 
 impl TestedDialects {
+    fn new_parser<'a>(&self, dialect: &'a dyn Dialect) -> Parser<'a> {
+        let parser = Parser::new(dialect);
+        if let Some(options) = &self.options {
+            parser.with_options(options.clone())
+        } else {
+            parser
+        }
+    }
+
     /// Run the given function for all of `self.dialects`, assert that they
     /// return the same result, and return that result.
     pub fn one_of_identical_results<F, T: Debug + PartialEq>(&self, f: F) -> T
@@ -63,7 +73,7 @@ impl TestedDialects {
         F: Fn(&mut Parser) -> T,
     {
         self.one_of_identical_results(|dialect| {
-            let mut parser = Parser::new(dialect).try_with_sql(sql).unwrap();
+            let mut parser = self.new_parser(dialect).try_with_sql(sql).unwrap();
             f(&mut parser)
         })
     }
@@ -71,7 +81,11 @@ impl TestedDialects {
     /// Parses a single SQL string into multiple statements, ensuring
     /// the result is the same for all tested dialects.
     pub fn parse_sql_statements(&self, sql: &str) -> Result<Vec<Statement>, ParserError> {
-        self.one_of_identical_results(|dialect| Parser::parse_sql(dialect, sql))
+        self.one_of_identical_results(|dialect| {
+            self.new_parser(dialect)
+                .try_with_sql(sql)?
+                .parse_statements()
+        })
         // To fail the `ensure_multiple_dialects_are_tested` test:
         // Parser::parse_sql(&**self.dialects.first().unwrap(), sql)
     }
@@ -100,6 +114,16 @@ impl TestedDialects {
             assert_eq!(canonical, only_statement.to_string())
         }
         only_statement
+    }
+
+    /// Ensures that `sql` parses as an [`Expr`], and that
+    /// re-serializing the parse result produces canonical
+    pub fn expr_parses_to(&self, sql: &str, canonical: &str) -> Expr {
+        let ast = self
+            .run_parser_method(sql, |parser| parser.parse_expr())
+            .unwrap();
+        assert_eq!(canonical, &ast.to_string());
+        ast
     }
 
     /// Ensures that `sql` parses as a single [Statement], and that
@@ -133,11 +157,7 @@ impl TestedDialects {
     /// re-serializing the parse result produces the same `sql`
     /// string (is not modified after a serialization round-trip).
     pub fn verified_expr(&self, sql: &str) -> Expr {
-        let ast = self
-            .run_parser_method(sql, |parser| parser.parse_expr())
-            .unwrap();
-        assert_eq!(sql, &ast.to_string(), "round-tripping without changes");
-        ast
+        self.expr_parses_to(sql, sql)
     }
 }
 
@@ -154,7 +174,9 @@ pub fn all_dialects() -> TestedDialects {
             Box::new(MySqlDialect {}),
             Box::new(BigQueryDialect {}),
             Box::new(SQLiteDialect {}),
+            Box::new(DuckDbDialect {}),
         ],
+        options: None,
     }
 }
 
@@ -181,7 +203,8 @@ pub fn expr_from_projection(item: &SelectItem) -> &Expr {
     }
 }
 
-pub fn number(n: &'static str) -> Value {
+/// Creates a `Value::Number`, panic'ing if n is not a number
+pub fn number(n: &str) -> Value {
     Value::Number(n.parse().unwrap(), false)
 }
 

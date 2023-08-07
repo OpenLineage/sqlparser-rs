@@ -195,9 +195,52 @@ impl std::error::Error for ParserError {}
 // By default, allow expressions up to this deep before erroring
 const DEFAULT_REMAINING_DEPTH: usize = 50;
 
-#[derive(Default)]
+/// Options that control how the [`Parser`] parses SQL text
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParserOptions {
     pub trailing_commas: bool,
+    /// Controls how literal values are unescaped. See
+    /// [`Tokenizer::with_unescape`] for more details.
+    pub unescape: bool,
+}
+
+impl Default for ParserOptions {
+    fn default() -> Self {
+        Self {
+            trailing_commas: false,
+            unescape: true,
+        }
+    }
+}
+
+impl ParserOptions {
+    /// Create a new [`ParserOptions`]
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Set if trailing commas are allowed.
+    ///
+    /// If this option is `false` (the default), the following SQL will
+    /// not parse. If the option is `true`, the SQL will parse.
+    ///
+    /// ```sql
+    ///  SELECT
+    ///   foo,
+    ///   bar,
+    ///  FROM baz
+    /// ```
+    pub fn with_trailing_commas(mut self, trailing_commas: bool) -> Self {
+        self.trailing_commas = trailing_commas;
+        self
+    }
+
+    /// Set if literal values are unescaped. Defaults to true. See
+    /// [`Tokenizer::with_unescape`] for more details.
+    pub fn with_unescape(mut self, unescape: bool) -> Self {
+        self.unescape = unescape;
+        self
+    }
 }
 
 pub struct Parser<'a> {
@@ -206,8 +249,9 @@ pub struct Parser<'a> {
     index: usize,
     /// The current dialect to use
     dialect: &'a dyn Dialect,
-    /// Additional options that allow you to mix & match behavior otherwise
-    /// constrained to certain dialects (e.g. trailing commas)
+    /// Additional options that allow you to mix & match behavior
+    /// otherwise constrained to certain dialects (e.g. trailing
+    /// commas) and/or format of parse (e.g. unescaping)
     options: ParserOptions,
     /// ensure the stack does not overflow by limiting recursion depth
     recursion_counter: RecursionCounter,
@@ -267,17 +311,20 @@ impl<'a> Parser<'a> {
     /// Specify additional parser options
     ///
     ///
-    /// [`Parser`] supports additional options ([`ParserOptions`]) that allow you to
-    /// mix & match behavior otherwise constrained to certain dialects (e.g. trailing
-    /// commas).
+    /// [`Parser`] supports additional options ([`ParserOptions`])
+    /// that allow you to mix & match behavior otherwise constrained
+    /// to certain dialects (e.g. trailing commas).
     ///
     /// Example:
     /// ```
     /// # use sqlparser::{parser::{Parser, ParserError, ParserOptions}, dialect::GenericDialect};
     /// # fn main() -> Result<(), ParserError> {
     /// let dialect = GenericDialect{};
+    /// let options = ParserOptions::new()
+    ///    .with_trailing_commas(true)
+    ///    .with_unescape(false);
     /// let result = Parser::new(&dialect)
-    ///   .with_options(ParserOptions { trailing_commas: true })
+    ///   .with_options(options)
     ///   .try_with_sql("SELECT a, b, COUNT(*), FROM foo GROUP BY a, b,")?
     ///   .parse_statements();
     ///   assert!(matches!(result, Ok(_)));
@@ -317,8 +364,9 @@ impl<'a> Parser<'a> {
     /// See example on [`Parser::new()`] for an example
     pub fn try_with_sql(self, sql: &str) -> Result<Self, ParserError> {
         debug!("Parsing sql '{}'...", sql);
-        let mut tokenizer = Tokenizer::new(self.dialect, sql);
-        let tokens = tokenizer.tokenize()?;
+        let tokens = Tokenizer::new(self.dialect, sql)
+            .with_unescape(self.options.unescape)
+            .tokenize()?;
         Ok(self.with_tokens(tokens))
     }
 
@@ -346,9 +394,14 @@ impl<'a> Parser<'a> {
                 expecting_statement_delimiter = false;
             }
 
-            if self.peek_token() == Token::EOF {
-                break;
+            match self.peek_token().token {
+                Token::EOF => break,
+
+                // end of statement
+                Token::Word(word) if word.keyword == Keyword::END => break,
+                _ => {}
             }
+
             if expecting_statement_delimiter {
                 return self.expected("end of statement", self.peek_token());
             }
@@ -473,7 +526,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_truncate(&mut self) -> Result<Statement, ParserError> {
-        self.expect_keyword(Keyword::TABLE)?;
+        let table = self.parse_keyword(Keyword::TABLE);
         let table_name = self.parse_object_name()?;
         let mut partitions = None;
         if self.parse_keyword(Keyword::PARTITION) {
@@ -484,6 +537,7 @@ impl<'a> Parser<'a> {
         Ok(Statement::Truncate {
             table_name,
             partitions,
+            table,
         })
     }
 
@@ -705,6 +759,7 @@ impl<'a> Parser<'a> {
                         over: None,
                         distinct: false,
                         special: true,
+                        order_by: vec![],
                     }))
                 }
                 Keyword::CURRENT_TIMESTAMP
@@ -792,7 +847,7 @@ impl<'a> Parser<'a> {
                 };
                 Ok(Expr::UnaryOp {
                     op,
-                    expr: Box::new(self.parse_subexpr(Self::PLUS_MINUS_PREC)?),
+                    expr: Box::new(self.parse_subexpr(Self::MUL_DIV_MOD_OP_PREC)?),
                 })
             }
             tok @ Token::DoubleExclamationMark
@@ -879,35 +934,15 @@ impl<'a> Parser<'a> {
 
     pub fn parse_function(&mut self, name: ObjectName) -> Result<Expr, ParserError> {
         self.expect_token(&Token::LParen)?;
-        let distinct = self.parse_all_or_distinct()?;
-        let args = self.parse_optional_args()?;
+        let distinct = self.parse_all_or_distinct()?.is_some();
+        let (args, order_by) = self.parse_optional_args_with_orderby()?;
         let over = if self.parse_keyword(Keyword::OVER) {
-            // TBD: support window names (`OVER mywin`) in place of inline specification
-            self.expect_token(&Token::LParen)?;
-            let partition_by = if self.parse_keywords(&[Keyword::PARTITION, Keyword::BY]) {
-                // a list of possibly-qualified column names
-                self.parse_comma_separated(Parser::parse_expr)?
+            if self.consume_token(&Token::LParen) {
+                let window_spec = self.parse_window_spec()?;
+                Some(WindowType::WindowSpec(window_spec))
             } else {
-                vec![]
-            };
-            let order_by = if self.parse_keywords(&[Keyword::ORDER, Keyword::BY]) {
-                self.parse_comma_separated(Parser::parse_order_by_expr)?
-            } else {
-                vec![]
-            };
-            let window_frame = if !self.consume_token(&Token::RParen) {
-                let window_frame = self.parse_window_frame()?;
-                self.expect_token(&Token::RParen)?;
-                Some(window_frame)
-            } else {
-                None
-            };
-
-            Some(WindowSpec {
-                partition_by,
-                order_by,
-                window_frame,
-            })
+                Some(WindowType::NamedWindow(self.parse_identifier()?))
+            }
         } else {
             None
         };
@@ -917,21 +952,24 @@ impl<'a> Parser<'a> {
             over,
             distinct,
             special: false,
+            order_by,
         }))
     }
 
     pub fn parse_time_functions(&mut self, name: ObjectName) -> Result<Expr, ParserError> {
-        let args = if self.consume_token(&Token::LParen) {
-            self.parse_optional_args()?
+        let (args, order_by, special) = if self.consume_token(&Token::LParen) {
+            let (args, order_by) = self.parse_optional_args_with_orderby()?;
+            (args, order_by, false)
         } else {
-            vec![]
+            (vec![], vec![], true)
         };
         Ok(Expr::Function(Function {
             name,
             args,
             over: None,
             distinct: false,
-            special: false,
+            special,
+            order_by,
         }))
     }
 
@@ -991,7 +1029,7 @@ impl<'a> Parser<'a> {
     /// parse a group by expr. a group by expr can be one of group sets, roll up, cube, or simple
     /// expr.
     fn parse_group_by_expr(&mut self) -> Result<Expr, ParserError> {
-        if dialect_of!(self is PostgreSqlDialect | GenericDialect) {
+        if self.dialect.supports_group_by_expr() {
             if self.parse_keywords(&[Keyword::GROUPING, Keyword::SETS]) {
                 self.expect_token(&Token::LParen)?;
                 let result = self.parse_comma_separated(|p| p.parse_tuple(false, true))?;
@@ -1302,7 +1340,7 @@ impl<'a> Parser<'a> {
     /// Parse a SQL LISTAGG expression, e.g. `LISTAGG(...) WITHIN GROUP (ORDER BY ...)`.
     pub fn parse_listagg_expr(&mut self) -> Result<Expr, ParserError> {
         self.expect_token(&Token::LParen)?;
-        let distinct = self.parse_all_or_distinct()?;
+        let distinct = self.parse_all_or_distinct()?.is_some();
         let expr = Box::new(self.parse_expr()?);
         // While ANSI SQL would would require the separator, Redshift makes this optional. Here we
         // choose to make the separator optional as this provides the more general implementation.
@@ -1369,8 +1407,7 @@ impl<'a> Parser<'a> {
         // ANSI SQL and BigQuery define ORDER BY inside function.
         if !self.dialect.supports_within_after_array_aggregation() {
             let order_by = if self.parse_keywords(&[Keyword::ORDER, Keyword::BY]) {
-                let order_by_expr = self.parse_order_by_expr()?;
-                Some(Box::new(order_by_expr))
+                Some(self.parse_comma_separated(Parser::parse_order_by_expr)?)
             } else {
                 None
             };
@@ -1393,10 +1430,13 @@ impl<'a> Parser<'a> {
         self.expect_token(&Token::RParen)?;
         let within_group = if self.parse_keywords(&[Keyword::WITHIN, Keyword::GROUP]) {
             self.expect_token(&Token::LParen)?;
-            self.expect_keywords(&[Keyword::ORDER, Keyword::BY])?;
-            let order_by_expr = self.parse_order_by_expr()?;
+            let order_by = if self.parse_keywords(&[Keyword::ORDER, Keyword::BY]) {
+                Some(self.parse_comma_separated(Parser::parse_order_by_expr)?)
+            } else {
+                None
+            };
             self.expect_token(&Token::RParen)?;
-            Some(Box::new(order_by_expr))
+            order_by
         } else {
             None
         };
@@ -1615,13 +1655,13 @@ impl<'a> Parser<'a> {
                 }
             };
 
-        Ok(Expr::Interval {
+        Ok(Expr::Interval(Interval {
             value: Box::new(value),
             leading_field,
             leading_precision,
             last_field,
             fractional_seconds_precision: fsec_precision,
-        })
+        }))
     }
 
     /// Parse an operator following an expression
@@ -1659,14 +1699,20 @@ impl<'a> Parser<'a> {
             }
             Token::Ampersand => Some(BinaryOperator::BitwiseAnd),
             Token::Div => Some(BinaryOperator::Divide),
-            Token::ShiftLeft if dialect_of!(self is PostgreSqlDialect | GenericDialect) => {
+            Token::DuckIntDiv if dialect_of!(self is DuckDbDialect | GenericDialect) => {
+                Some(BinaryOperator::DuckIntegerDivide)
+            }
+            Token::ShiftLeft if dialect_of!(self is PostgreSqlDialect | DuckDbDialect | GenericDialect) => {
                 Some(BinaryOperator::PGBitwiseShiftLeft)
             }
-            Token::ShiftRight if dialect_of!(self is PostgreSqlDialect | GenericDialect) => {
+            Token::ShiftRight if dialect_of!(self is PostgreSqlDialect | DuckDbDialect | GenericDialect) => {
                 Some(BinaryOperator::PGBitwiseShiftRight)
             }
             Token::Sharp if dialect_of!(self is PostgreSqlDialect) => {
                 Some(BinaryOperator::PGBitwiseXor)
+            }
+            Token::Overlap if dialect_of!(self is PostgreSqlDialect | GenericDialect) => {
+                Some(BinaryOperator::PGOverlap)
             }
             Token::Tilde => Some(BinaryOperator::PGRegexMatch),
             Token::TildeAsterisk => Some(BinaryOperator::PGRegexIMatch),
@@ -1970,6 +2016,7 @@ impl<'a> Parser<'a> {
     }
 
     // use https://www.postgresql.org/docs/7.0/operators.htm#AEN2026 as a reference
+    const MUL_DIV_MOD_OP_PREC: u8 = 40;
     const PLUS_MINUS_PREC: u8 = 30;
     const XOR_PREC: u8 = 24;
     const TIME_ZONE_PREC: u8 = 20;
@@ -2029,6 +2076,7 @@ impl<'a> Parser<'a> {
             Token::Word(w) if w.keyword == Keyword::ILIKE => Ok(Self::LIKE_PREC),
             Token::Word(w) if w.keyword == Keyword::SIMILAR => Ok(Self::LIKE_PREC),
             Token::Word(w) if w.keyword == Keyword::OPERATOR => Ok(Self::BETWEEN_PREC),
+            Token::Word(w) if w.keyword == Keyword::DIV => Ok(Self::MUL_DIV_MOD_OP_PREC),
             Token::Eq
             | Token::Lt
             | Token::LtEq
@@ -2045,13 +2093,16 @@ impl<'a> Parser<'a> {
             Token::Caret | Token::Sharp | Token::ShiftRight | Token::ShiftLeft => Ok(22),
             Token::Ampersand => Ok(23),
             Token::Plus | Token::Minus => Ok(Self::PLUS_MINUS_PREC),
-            Token::Mul | Token::Div | Token::Mod | Token::StringConcat => Ok(40),
+            Token::Mul | Token::Div | Token::DuckIntDiv | Token::Mod | Token::StringConcat => {
+                Ok(Self::MUL_DIV_MOD_OP_PREC)
+            }
             Token::DoubleColon => Ok(50),
             Token::Colon => Ok(50),
             Token::ExclamationMark => Ok(50),
             Token::LBracket
             | Token::LongArrow
             | Token::Arrow
+            | Token::Overlap
             | Token::HashArrow
             | Token::HashLongArrow
             | Token::AtArrow
@@ -2300,21 +2351,37 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse either `ALL` or `DISTINCT`. Returns `true` if `DISTINCT` is parsed and results in a
-    /// `ParserError` if both `ALL` and `DISTINCT` are fround.
-    pub fn parse_all_or_distinct(&mut self) -> Result<bool, ParserError> {
+    /// Parse either `ALL`, `DISTINCT` or `DISTINCT ON (...)`. Returns `None` if `ALL` is parsed
+    /// and results in a `ParserError` if both `ALL` and `DISTINCT` are found.
+    pub fn parse_all_or_distinct(&mut self) -> Result<Option<Distinct>, ParserError> {
         let all = self.parse_keyword(Keyword::ALL);
         let distinct = self.parse_keyword(Keyword::DISTINCT);
-        if all && distinct {
-            parser_err!("Cannot specify both ALL and DISTINCT".to_string())
-        } else {
-            Ok(distinct)
+        if !distinct {
+            return Ok(None);
         }
+        if all {
+            return parser_err!("Cannot specify both ALL and DISTINCT".to_string());
+        }
+        let on = self.parse_keyword(Keyword::ON);
+        if !on {
+            return Ok(Some(Distinct::Distinct));
+        }
+
+        self.expect_token(&Token::LParen)?;
+        let col_names = if self.consume_token(&Token::RParen) {
+            self.prev_token();
+            Vec::new()
+        } else {
+            self.parse_comma_separated(Parser::parse_expr)?
+        };
+        self.expect_token(&Token::RParen)?;
+        Ok(Some(Distinct::On(col_names)))
     }
 
     /// Parse a SQL CREATE statement
     pub fn parse_create(&mut self) -> Result<Statement, ParserError> {
         let or_replace = self.parse_keywords(&[Keyword::OR, Keyword::REPLACE]);
+        let or_alter = self.parse_keywords(&[Keyword::OR, Keyword::ALTER]);
         let local = self.parse_one_of_keywords(&[Keyword::LOCAL]).is_some();
         let global = self.parse_one_of_keywords(&[Keyword::GLOBAL]).is_some();
         let transient = self.parse_one_of_keywords(&[Keyword::TRANSIENT]).is_some();
@@ -2337,6 +2404,8 @@ impl<'a> Parser<'a> {
             self.parse_create_external_table(or_replace)
         } else if self.parse_keyword(Keyword::FUNCTION) {
             self.parse_create_function(or_replace, temporary)
+        } else if self.parse_keyword(Keyword::MACRO) {
+            self.parse_create_macro(or_replace, temporary)
         } else if or_replace {
             self.expected(
                 "[EXTERNAL] TABLE or [MATERIALIZED] VIEW or FUNCTION after CREATE OR REPLACE",
@@ -2356,6 +2425,10 @@ impl<'a> Parser<'a> {
             self.parse_create_role()
         } else if self.parse_keyword(Keyword::SEQUENCE) {
             self.parse_create_sequence(temporary)
+        } else if self.parse_keyword(Keyword::TYPE) {
+            self.parse_create_type()
+        } else if self.parse_keyword(Keyword::PROCEDURE) {
+            self.parse_create_procedure(or_alter)
         } else {
             self.expected("an object type after CREATE", self.peek_token())
         }
@@ -2613,6 +2686,8 @@ impl<'a> Parser<'a> {
                 return_type,
                 params,
             })
+        } else if dialect_of!(self is DuckDbDialect) {
+            self.parse_create_macro(or_replace, temporary)
         } else {
             self.prev_token();
             self.expected("an object type after CREATE", self.peek_token())
@@ -2686,6 +2761,53 @@ impl<'a> Parser<'a> {
                 return Ok(body);
             }
         }
+    }
+
+    pub fn parse_create_macro(
+        &mut self,
+        or_replace: bool,
+        temporary: bool,
+    ) -> Result<Statement, ParserError> {
+        if dialect_of!(self is DuckDbDialect |  GenericDialect) {
+            let name = self.parse_object_name()?;
+            self.expect_token(&Token::LParen)?;
+            let args = if self.consume_token(&Token::RParen) {
+                self.prev_token();
+                None
+            } else {
+                Some(self.parse_comma_separated(Parser::parse_macro_arg)?)
+            };
+
+            self.expect_token(&Token::RParen)?;
+            self.expect_keyword(Keyword::AS)?;
+
+            Ok(Statement::CreateMacro {
+                or_replace,
+                temporary,
+                name,
+                args,
+                definition: if self.parse_keyword(Keyword::TABLE) {
+                    MacroDefinition::Table(self.parse_query()?)
+                } else {
+                    MacroDefinition::Expr(self.parse_expr()?)
+                },
+            })
+        } else {
+            self.prev_token();
+            self.expected("an object type after CREATE", self.peek_token())
+        }
+    }
+
+    fn parse_macro_arg(&mut self) -> Result<MacroArg, ParserError> {
+        let name = self.parse_identifier()?;
+
+        let default_expr =
+            if self.consume_token(&Token::DuckAssignment) || self.consume_token(&Token::RArrow) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+        Ok(MacroArg { name, default_expr })
     }
 
     pub fn parse_create_external_table(
@@ -3416,6 +3538,7 @@ impl<'a> Parser<'a> {
                 None
             };
 
+        let strict = self.parse_keyword(Keyword::STRICT);
         Ok(CreateTableBuilder::new(table_name)
             .temporary(temporary)
             .columns(columns)
@@ -3438,7 +3561,30 @@ impl<'a> Parser<'a> {
             .collation(collation)
             .on_commit(on_commit)
             .on_cluster(on_cluster)
+            .strict(strict)
             .build())
+    }
+
+    pub fn parse_optional_procedure_parameters(
+        &mut self,
+    ) -> Result<Option<Vec<ProcedureParam>>, ParserError> {
+        let mut params = vec![];
+        if !self.consume_token(&Token::LParen) || self.consume_token(&Token::RParen) {
+            return Ok(Some(params));
+        }
+        loop {
+            if let Token::Word(_) = self.peek_token().token {
+                params.push(self.parse_procedure_param()?)
+            }
+            let comma = self.consume_token(&Token::Comma);
+            if self.consume_token(&Token::RParen) {
+                // allow a trailing comma, even though it's not in standard
+                break;
+            } else if !comma {
+                return self.expected("',' or ')' after parameter definition", self.peek_token());
+            }
+        }
+        Ok(Some(params))
     }
 
     pub fn parse_columns(&mut self) -> Result<(Vec<ColumnDef>, Vec<TableConstraint>), ParserError> {
@@ -3466,6 +3612,12 @@ impl<'a> Parser<'a> {
         }
 
         Ok((columns, constraints))
+    }
+
+    pub fn parse_procedure_param(&mut self) -> Result<ProcedureParam, ParserError> {
+        let name = self.parse_identifier()?;
+        let data_type = self.parse_data_type()?;
+        Ok(ProcedureParam { name, data_type })
     }
 
     pub fn parse_column_def(&mut self) -> Result<ColumnDef, ParserError> {
@@ -3551,7 +3703,7 @@ impl<'a> Parser<'a> {
             self.expect_token(&Token::RParen)?;
             Ok(Some(ColumnOption::Check(expr)))
         } else if self.parse_keyword(Keyword::AUTO_INCREMENT)
-            && dialect_of!(self is MySqlDialect |  GenericDialect)
+            && dialect_of!(self is MySqlDialect | GenericDialect)
         {
             // Support AUTO_INCREMENT for MySQL
             Ok(Some(ColumnOption::DialectSpecific(vec![
@@ -3799,8 +3951,10 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_alter(&mut self) -> Result<Statement, ParserError> {
-        let object_type = self.expect_one_of_keywords(&[Keyword::TABLE, Keyword::INDEX])?;
+        let object_type =
+            self.expect_one_of_keywords(&[Keyword::VIEW, Keyword::TABLE, Keyword::INDEX])?;
         match object_type {
+            Keyword::VIEW => self.parse_alter_view(),
             Keyword::TABLE => {
                 let _ = self.parse_keyword(Keyword::ONLY); // [ ONLY ]
                 let table_name = self.parse_object_name()?;
@@ -3821,7 +3975,7 @@ impl<'a> Parser<'a> {
                         } else {
                             let column_keyword = self.parse_keyword(Keyword::COLUMN);
 
-                            let if_not_exists = if dialect_of!(self is PostgreSqlDialect | BigQueryDialect | GenericDialect)
+                            let if_not_exists = if dialect_of!(self is PostgreSqlDialect | BigQueryDialect | DuckDbDialect | GenericDialect)
                             {
                                 self.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS])
                                     || if_not_exists
@@ -3998,15 +4152,51 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub fn parse_alter_view(&mut self) -> Result<Statement, ParserError> {
+        let name = self.parse_object_name()?;
+        let columns = self.parse_parenthesized_column_list(Optional, false)?;
+
+        let with_options = self.parse_options(Keyword::WITH)?;
+
+        self.expect_keyword(Keyword::AS)?;
+        let query = Box::new(self.parse_query()?);
+
+        Ok(Statement::AlterView {
+            name,
+            columns,
+            query,
+            with_options,
+        })
+    }
+
     /// Parse a copy statement
     pub fn parse_copy(&mut self) -> Result<Statement, ParserError> {
-        let table_name = self.parse_object_name()?;
-        let columns = self.parse_parenthesized_column_list(Optional, false)?;
+        let source;
+        if self.consume_token(&Token::LParen) {
+            source = CopySource::Query(Box::new(self.parse_query()?));
+            self.expect_token(&Token::RParen)?;
+        } else {
+            let table_name = self.parse_object_name()?;
+            let columns = self.parse_parenthesized_column_list(Optional, false)?;
+            source = CopySource::Table {
+                table_name,
+                columns,
+            };
+        }
         let to = match self.parse_one_of_keywords(&[Keyword::FROM, Keyword::TO]) {
             Some(Keyword::FROM) => false,
             Some(Keyword::TO) => true,
             _ => self.expected("FROM or TO", self.peek_token())?,
         };
+        if !to {
+            // Use a separate if statement to prevent Rust compiler from complaining about
+            // "if statement in this position is unstable: https://github.com/rust-lang/rust/issues/53667"
+            if let CopySource::Query(_) = source {
+                return Err(ParserError::ParserError(
+                    "COPY ... FROM does not support query as a source".to_string(),
+                ));
+            }
+        }
         let target = if self.parse_keyword(Keyword::STDIN) {
             CopyTarget::Stdin
         } else if self.parse_keyword(Keyword::STDOUT) {
@@ -4037,8 +4227,7 @@ impl<'a> Parser<'a> {
             vec![]
         };
         Ok(Statement::Copy {
-            table_name,
-            columns,
+            source,
             to,
             target,
             options,
@@ -4371,8 +4560,11 @@ impl<'a> Parser<'a> {
         let mut data = match next_token.token {
             Token::Word(w) => match w.keyword {
                 Keyword::BOOLEAN => Ok(DataType::Boolean),
+                Keyword::BOOL => Ok(DataType::Bool),
                 Keyword::FLOAT => Ok(DataType::Float(self.parse_optional_precision()?)),
                 Keyword::REAL => Ok(DataType::Real),
+                Keyword::FLOAT4 => Ok(DataType::FLOAT4),
+                Keyword::FLOAT8 => Ok(DataType::FLOAT8),
                 Keyword::DOUBLE => {
                     if self.parse_keyword(Keyword::PRECISION) {
                         Ok(DataType::DoublePrecision)
@@ -4386,6 +4578,14 @@ impl<'a> Parser<'a> {
                         Ok(DataType::UnsignedTinyInt(optional_precision?))
                     } else {
                         Ok(DataType::TinyInt(optional_precision?))
+                    }
+                }
+                Keyword::INT2 => {
+                    let optional_precision = self.parse_optional_precision();
+                    if self.parse_keyword(Keyword::UNSIGNED) {
+                        Ok(DataType::UnsignedInt2(optional_precision?))
+                    } else {
+                        Ok(DataType::Int2(optional_precision?))
                     }
                 }
                 Keyword::SMALLINT => {
@@ -4412,6 +4612,14 @@ impl<'a> Parser<'a> {
                         Ok(DataType::Int(optional_precision?))
                     }
                 }
+                Keyword::INT4 => {
+                    let optional_precision = self.parse_optional_precision();
+                    if self.parse_keyword(Keyword::UNSIGNED) {
+                        Ok(DataType::UnsignedInt4(optional_precision?))
+                    } else {
+                        Ok(DataType::Int4(optional_precision?))
+                    }
+                }
                 Keyword::INTEGER => {
                     let optional_precision = self.parse_optional_precision();
                     if self.parse_keyword(Keyword::UNSIGNED) {
@@ -4426,6 +4634,14 @@ impl<'a> Parser<'a> {
                         Ok(DataType::UnsignedBigInt(optional_precision?))
                     } else {
                         Ok(DataType::BigInt(optional_precision?))
+                    }
+                }
+                Keyword::INT8 => {
+                    let optional_precision = self.parse_optional_precision();
+                    if self.parse_keyword(Keyword::UNSIGNED) {
+                        Ok(DataType::UnsignedInt8(optional_precision?))
+                    } else {
+                        Ok(DataType::Int8(optional_precision?))
                     }
                 }
                 Keyword::VARCHAR => Ok(DataType::Varchar(self.parse_optional_character_length()?)),
@@ -4672,6 +4888,92 @@ impl<'a> Parser<'a> {
         Ok(idents)
     }
 
+    /// Parse identifiers of form ident1[.identN]*
+    ///
+    /// Similar in functionality to [parse_identifiers], with difference
+    /// being this function is much more strict about parsing a valid multipart identifier, not
+    /// allowing extraneous tokens to be parsed, otherwise it fails.
+    ///
+    /// For example:
+    ///
+    /// ```rust
+    /// use sqlparser::ast::Ident;
+    /// use sqlparser::dialect::GenericDialect;
+    /// use sqlparser::parser::Parser;
+    ///
+    /// let dialect = GenericDialect {};
+    /// let expected = vec![Ident::new("one"), Ident::new("two")];
+    ///
+    /// // expected usage
+    /// let sql = "one.two";
+    /// let mut parser = Parser::new(&dialect).try_with_sql(sql).unwrap();
+    /// let actual = parser.parse_multipart_identifier().unwrap();
+    /// assert_eq!(&actual, &expected);
+    ///
+    /// // parse_identifiers is more loose on what it allows, parsing successfully
+    /// let sql = "one + two";
+    /// let mut parser = Parser::new(&dialect).try_with_sql(sql).unwrap();
+    /// let actual = parser.parse_identifiers().unwrap();
+    /// assert_eq!(&actual, &expected);
+    ///
+    /// // expected to strictly fail due to + separator
+    /// let sql = "one + two";
+    /// let mut parser = Parser::new(&dialect).try_with_sql(sql).unwrap();
+    /// let actual = parser.parse_multipart_identifier().unwrap_err();
+    /// assert_eq!(
+    ///     actual.to_string(),
+    ///     "sql parser error: Unexpected token in identifier: +"
+    /// );
+    /// ```
+    ///
+    /// [parse_identifiers]: Parser::parse_identifiers
+    pub fn parse_multipart_identifier(&mut self) -> Result<Vec<Ident>, ParserError> {
+        let mut idents = vec![];
+
+        // expecting at least one word for identifier
+        match self.next_token().token {
+            Token::Word(w) => idents.push(w.to_ident()),
+            Token::EOF => {
+                return Err(ParserError::ParserError(
+                    "Empty input when parsing identifier".to_string(),
+                ))?
+            }
+            token => {
+                return Err(ParserError::ParserError(format!(
+                    "Unexpected token in identifier: {token}"
+                )))?
+            }
+        };
+
+        // parse optional next parts if exist
+        loop {
+            match self.next_token().token {
+                // ensure that optional period is succeeded by another identifier
+                Token::Period => match self.next_token().token {
+                    Token::Word(w) => idents.push(w.to_ident()),
+                    Token::EOF => {
+                        return Err(ParserError::ParserError(
+                            "Trailing period in identifier".to_string(),
+                        ))?
+                    }
+                    token => {
+                        return Err(ParserError::ParserError(format!(
+                            "Unexpected token following period in identifier: {token}"
+                        )))?
+                    }
+                },
+                Token::EOF => break,
+                token => {
+                    return Err(ParserError::ParserError(format!(
+                        "Unexpected token in identifier: {token}"
+                    )))?
+                }
+            }
+        }
+
+        Ok(idents)
+    }
+
     /// Parse a simple one-word identifier (possibly quoted, possibly a keyword)
     pub fn parse_identifier(&mut self) -> Result<Ident, ParserError> {
         let next_token = self.next_token();
@@ -4813,10 +5115,17 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_delete(&mut self) -> Result<Statement, ParserError> {
-        self.expect_keyword(Keyword::FROM)?;
-        let table_name = self.parse_table_factor()?;
+        let tables = if !self.parse_keyword(Keyword::FROM) {
+            let tables = self.parse_comma_separated(Parser::parse_object_name)?;
+            self.expect_keyword(Keyword::FROM)?;
+            tables
+        } else {
+            vec![]
+        };
+
+        let from = self.parse_comma_separated(Parser::parse_table_and_joins)?;
         let using = if self.parse_keyword(Keyword::USING) {
-            Some(self.parse_table_factor()?)
+            Some(self.parse_comma_separated(Parser::parse_table_and_joins)?)
         } else {
             None
         };
@@ -4833,7 +5142,8 @@ impl<'a> Parser<'a> {
         };
 
         Ok(Statement::Delete {
-            table_name,
+            tables,
+            from,
             using,
             selection,
             returning,
@@ -5097,8 +5407,14 @@ impl<'a> Parser<'a> {
     pub fn parse_set_quantifier(&mut self, op: &Option<SetOperator>) -> SetQuantifier {
         match op {
             Some(SetOperator::Union) => {
-                if self.parse_keyword(Keyword::ALL) {
-                    SetQuantifier::All
+                if self.parse_keywords(&[Keyword::BY, Keyword::NAME]) {
+                    SetQuantifier::ByName
+                } else if self.parse_keyword(Keyword::ALL) {
+                    if self.parse_keywords(&[Keyword::BY, Keyword::NAME]) {
+                        SetQuantifier::AllByName
+                    } else {
+                        SetQuantifier::All
+                    }
                 } else if self.parse_keyword(Keyword::DISTINCT) {
                     SetQuantifier::Distinct
                 } else {
@@ -5226,6 +5542,12 @@ impl<'a> Parser<'a> {
             None
         };
 
+        let named_windows = if self.parse_keyword(Keyword::WINDOW) {
+            self.parse_comma_separated(Parser::parse_named_window)?
+        } else {
+            vec![]
+        };
+
         let qualify = if self.parse_keyword(Keyword::QUALIFY) {
             Some(self.parse_expr()?)
         } else {
@@ -5245,6 +5567,7 @@ impl<'a> Parser<'a> {
             distribute_by,
             sort_by,
             having,
+            named_window: named_windows,
             qualify,
         })
     }
@@ -5762,7 +6085,7 @@ impl<'a> Parser<'a> {
             && self.parse_keyword(Keyword::UNNEST)
         {
             self.expect_token(&Token::LParen)?;
-            let expr = self.parse_expr()?;
+            let array_exprs = self.parse_comma_separated(Parser::parse_expr)?;
             self.expect_token(&Token::RParen)?;
 
             let alias = match self.parse_optional_table_alias(keywords::RESERVED_FOR_TABLE_ALIAS) {
@@ -5788,7 +6111,7 @@ impl<'a> Parser<'a> {
 
             Ok(TableFactor::UNNEST {
                 alias,
-                array_expr: Box::new(expr),
+                array_exprs,
                 with_offset,
                 with_offset_alias,
             })
@@ -6182,7 +6505,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::SET)?;
         let assignments = self.parse_comma_separated(Parser::parse_assignment)?;
         let from = if self.parse_keyword(Keyword::FROM)
-            && dialect_of!(self is GenericDialect | PostgreSqlDialect | BigQueryDialect | SnowflakeDialect | RedshiftSqlDialect | MsSqlDialect)
+            && dialect_of!(self is GenericDialect | PostgreSqlDialect | DuckDbDialect | BigQueryDialect | SnowflakeDialect | RedshiftSqlDialect | MsSqlDialect)
         {
             Some(self.parse_table_and_joins()?)
         } else {
@@ -6238,6 +6561,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub fn parse_optional_args_with_orderby(
+        &mut self,
+    ) -> Result<(Vec<FunctionArg>, Vec<OrderByExpr>), ParserError> {
+        if self.consume_token(&Token::RParen) {
+            Ok((vec![], vec![]))
+        } else {
+            let args = self.parse_comma_separated(Parser::parse_function_args)?;
+            let order_by = if self.parse_keywords(&[Keyword::ORDER, Keyword::BY]) {
+                self.parse_comma_separated(Parser::parse_order_by_expr)?
+            } else {
+                vec![]
+            };
+            self.expect_token(&Token::RParen)?;
+            Ok((args, order_by))
+        }
+    }
+
     /// Parse a comma-delimited list of projections after SELECT
     pub fn parse_select_item(&mut self) -> Result<SelectItem, ParserError> {
         match self.parse_wildcard_expr()? {
@@ -6282,7 +6622,8 @@ impl<'a> Parser<'a> {
     pub fn parse_wildcard_additional_options(
         &mut self,
     ) -> Result<WildcardAdditionalOptions, ParserError> {
-        let opt_exclude = if dialect_of!(self is GenericDialect | SnowflakeDialect) {
+        let opt_exclude = if dialect_of!(self is GenericDialect | DuckDbDialect | SnowflakeDialect)
+        {
             self.parse_optional_select_item_exclude()?
         } else {
             None
@@ -6564,6 +6905,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::TRANSACTION)?;
         Ok(Statement::StartTransaction {
             modes: self.parse_transaction_modes()?,
+            begin: false,
         })
     }
 
@@ -6571,6 +6913,7 @@ impl<'a> Parser<'a> {
         let _ = self.parse_one_of_keywords(&[Keyword::TRANSACTION, Keyword::WORK]);
         Ok(Statement::StartTransaction {
             modes: self.parse_transaction_modes()?,
+            begin: true,
         })
     }
 
@@ -6874,6 +7217,94 @@ impl<'a> Parser<'a> {
     pub fn index(&self) -> usize {
         self.index
     }
+
+    pub fn parse_named_window(&mut self) -> Result<NamedWindowDefinition, ParserError> {
+        let ident = self.parse_identifier()?;
+        self.expect_keyword(Keyword::AS)?;
+        self.expect_token(&Token::LParen)?;
+        let window_spec = self.parse_window_spec()?;
+        Ok(NamedWindowDefinition(ident, window_spec))
+    }
+
+    pub fn parse_create_procedure(&mut self, or_alter: bool) -> Result<Statement, ParserError> {
+        let name = self.parse_object_name()?;
+        let params = self.parse_optional_procedure_parameters()?;
+        self.expect_keyword(Keyword::AS)?;
+        self.expect_keyword(Keyword::BEGIN)?;
+        let statements = self.parse_statements()?;
+        self.expect_keyword(Keyword::END)?;
+        Ok(Statement::CreateProcedure {
+            name,
+            or_alter,
+            params,
+            body: statements,
+        })
+    }
+
+    pub fn parse_window_spec(&mut self) -> Result<WindowSpec, ParserError> {
+        let partition_by = if self.parse_keywords(&[Keyword::PARTITION, Keyword::BY]) {
+            self.parse_comma_separated(Parser::parse_expr)?
+        } else {
+            vec![]
+        };
+        let order_by = if self.parse_keywords(&[Keyword::ORDER, Keyword::BY]) {
+            self.parse_comma_separated(Parser::parse_order_by_expr)?
+        } else {
+            vec![]
+        };
+        let window_frame = if !self.consume_token(&Token::RParen) {
+            let window_frame = self.parse_window_frame()?;
+            self.expect_token(&Token::RParen)?;
+            Some(window_frame)
+        } else {
+            None
+        };
+        Ok(WindowSpec {
+            partition_by,
+            order_by,
+            window_frame,
+        })
+    }
+
+    pub fn parse_create_type(&mut self) -> Result<Statement, ParserError> {
+        let name = self.parse_object_name()?;
+        self.expect_keyword(Keyword::AS)?;
+
+        let mut attributes = vec![];
+        if !self.consume_token(&Token::LParen) || self.consume_token(&Token::RParen) {
+            return Ok(Statement::CreateType {
+                name,
+                representation: UserDefinedTypeRepresentation::Composite { attributes },
+            });
+        }
+
+        loop {
+            let attr_name = self.parse_identifier()?;
+            let attr_data_type = self.parse_data_type()?;
+            let attr_collation = if self.parse_keyword(Keyword::COLLATE) {
+                Some(self.parse_object_name()?)
+            } else {
+                None
+            };
+            attributes.push(UserDefinedTypeCompositeAttributeDef {
+                name: attr_name,
+                data_type: attr_data_type,
+                collation: attr_collation,
+            });
+            let comma = self.consume_token(&Token::Comma);
+            if self.consume_token(&Token::RParen) {
+                // allow a trailing comma
+                break;
+            } else if !comma {
+                return self.expected("',' or ')' after attribute definition", self.peek_token());
+            }
+        }
+
+        Ok(Statement::CreateType {
+            name,
+            representation: UserDefinedTypeRepresentation::Composite { attributes },
+        })
+    }
 }
 
 impl Word {
@@ -6935,6 +7366,7 @@ mod tests {
             // Character string types: <https://jakewheat.github.io/sql-overview/sql-2016-foundation-grammar.html#character-string-type>
             let dialect = TestedDialects {
                 dialects: vec![Box::new(GenericDialect {}), Box::new(AnsiDialect {})],
+                options: None,
             };
 
             test_parse_data_type!(dialect, "CHARACTER", DataType::Character(None));
@@ -7064,6 +7496,7 @@ mod tests {
             // Character large object types: <https://jakewheat.github.io/sql-overview/sql-2016-foundation-grammar.html#character-large-object-length>
             let dialect = TestedDialects {
                 dialects: vec![Box::new(GenericDialect {}), Box::new(AnsiDialect {})],
+                options: None,
             };
 
             test_parse_data_type!(
@@ -7096,6 +7529,7 @@ mod tests {
         fn test_parse_custom_types() {
             let dialect = TestedDialects {
                 dialects: vec![Box::new(GenericDialect {}), Box::new(AnsiDialect {})],
+                options: None,
             };
             test_parse_data_type!(
                 dialect,
@@ -7127,6 +7561,7 @@ mod tests {
             // Exact numeric types: <https://jakewheat.github.io/sql-overview/sql-2016-foundation-grammar.html#exact-numeric-type>
             let dialect = TestedDialects {
                 dialects: vec![Box::new(GenericDialect {}), Box::new(AnsiDialect {})],
+                options: None,
             };
 
             test_parse_data_type!(dialect, "NUMERIC", DataType::Numeric(ExactNumberInfo::None));
@@ -7177,6 +7612,7 @@ mod tests {
             // Datetime types: <https://jakewheat.github.io/sql-overview/sql-2016-foundation-grammar.html#datetime-type>
             let dialect = TestedDialects {
                 dialects: vec![Box::new(GenericDialect {}), Box::new(AnsiDialect {})],
+                options: None,
             };
 
             test_parse_data_type!(dialect, "DATE", DataType::Date);
@@ -7288,6 +7724,7 @@ mod tests {
 
         let dialect = TestedDialects {
             dialects: vec![Box::new(GenericDialect {}), Box::new(MySqlDialect {})],
+            options: None,
         };
 
         test_parse_table_constraint!(
@@ -7404,6 +7841,87 @@ mod tests {
             Err(ParserError::ParserError(
                 "Explain must be root of the plan".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn test_parse_multipart_identifier_positive() {
+        let dialect = TestedDialects {
+            dialects: vec![Box::new(GenericDialect {})],
+            options: None,
+        };
+
+        // parse multipart with quotes
+        let expected = vec![
+            Ident {
+                value: "CATALOG".to_string(),
+                quote_style: None,
+            },
+            Ident {
+                value: "F(o)o. \"bar".to_string(),
+                quote_style: Some('"'),
+            },
+            Ident {
+                value: "table".to_string(),
+                quote_style: None,
+            },
+        ];
+        dialect.run_parser_method(r#"CATALOG."F(o)o. ""bar".table"#, |parser| {
+            let actual = parser.parse_multipart_identifier().unwrap();
+            assert_eq!(expected, actual);
+        });
+
+        // allow whitespace between ident parts
+        let expected = vec![
+            Ident {
+                value: "CATALOG".to_string(),
+                quote_style: None,
+            },
+            Ident {
+                value: "table".to_string(),
+                quote_style: None,
+            },
+        ];
+        dialect.run_parser_method("CATALOG . table", |parser| {
+            let actual = parser.parse_multipart_identifier().unwrap();
+            assert_eq!(expected, actual);
+        });
+    }
+
+    #[test]
+    fn test_parse_multipart_identifier_negative() {
+        macro_rules! test_parse_multipart_identifier_error {
+            ($input:expr, $expected_err:expr $(,)?) => {{
+                all_dialects().run_parser_method(&*$input, |parser| {
+                    let actual_err = parser.parse_multipart_identifier().unwrap_err();
+                    assert_eq!(actual_err.to_string(), $expected_err);
+                });
+            }};
+        }
+
+        test_parse_multipart_identifier_error!(
+            "",
+            "sql parser error: Empty input when parsing identifier",
+        );
+
+        test_parse_multipart_identifier_error!(
+            "*schema.table",
+            "sql parser error: Unexpected token in identifier: *",
+        );
+
+        test_parse_multipart_identifier_error!(
+            "schema.table*",
+            "sql parser error: Unexpected token in identifier: *",
+        );
+
+        test_parse_multipart_identifier_error!(
+            "schema.table.",
+            "sql parser error: Trailing period in identifier",
+        );
+
+        test_parse_multipart_identifier_error!(
+            "schema.*",
+            "sql parser error: Unexpected token following period in identifier: *",
         );
     }
 }

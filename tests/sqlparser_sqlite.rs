@@ -242,9 +242,19 @@ fn parse_similar_to() {
     chk(true);
 }
 
+#[test]
+fn parse_create_table_with_strict() {
+    let sql = "CREATE TABLE Fruits (id TEXT NOT NULL PRIMARY KEY) STRICT";
+    if let Statement::CreateTable { name, strict, .. } = sqlite().verified_stmt(sql) {
+        assert_eq!(name.to_string(), "Fruits");
+        assert!(strict);
+    }
+}
+
 fn sqlite() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(SQLiteDialect {})],
+        options: None,
     }
 }
 
@@ -252,5 +262,6 @@ fn sqlite_and_generic() -> TestedDialects {
     TestedDialects {
         // we don't have a separate SQLite dialect, so test only the generic dialect for now
         dialects: vec![Box::new(SQLiteDialect {}), Box::new(GenericDialect {})],
+        options: None,
     }
 }
