@@ -26,6 +26,7 @@ use crate::ast::*;
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+#[cfg_attr(feature = "visitor", visit(with = "visit_query"))]
 pub struct Query {
     /// WITH (common table expressions, or CTEs)
     pub with: Option<With>,
@@ -35,12 +36,20 @@ pub struct Query {
     pub order_by: Vec<OrderByExpr>,
     /// `LIMIT { <N> | ALL }`
     pub limit: Option<Expr>,
+
+    /// `LIMIT { <N> } BY { <expr>,<expr>,... } }`
+    pub limit_by: Vec<Expr>,
+
     /// `OFFSET <N> [ { ROW | ROWS } ]`
     pub offset: Option<Offset>,
     /// `FETCH { FIRST | NEXT } <N> [ PERCENT ] { ROW | ROWS } | { ONLY | WITH TIES }`
     pub fetch: Option<Fetch>,
     /// `FOR { UPDATE | SHARE } [ OF table_name ] [ SKIP LOCKED | NOWAIT ]`
     pub locks: Vec<LockClause>,
+    /// `FOR XML { RAW | AUTO | EXPLICIT | PATH } [ , ELEMENTS ]`
+    /// `FOR JSON { AUTO | PATH } [ , INCLUDE_NULL_VALUES ]`
+    /// (MSSQL-specific)
+    pub for_clause: Option<ForClause>,
 }
 
 impl fmt::Display for Query {
@@ -58,11 +67,17 @@ impl fmt::Display for Query {
         if let Some(ref offset) = self.offset {
             write!(f, " {offset}")?;
         }
+        if !self.limit_by.is_empty() {
+            write!(f, " BY {}", display_separated(&self.limit_by, ", "))?;
+        }
         if let Some(ref fetch) = self.fetch {
             write!(f, " {fetch}")?;
         }
         if !self.locks.is_empty() {
             write!(f, " {}", display_separated(&self.locks, " "))?;
+        }
+        if let Some(ref for_clause) = self.for_clause {
+            write!(f, " {}", for_clause)?;
         }
         Ok(())
     }
@@ -113,7 +128,8 @@ impl fmt::Display for SetExpr {
                     SetQuantifier::All
                     | SetQuantifier::Distinct
                     | SetQuantifier::ByName
-                    | SetQuantifier::AllByName => write!(f, " {set_quantifier}")?,
+                    | SetQuantifier::AllByName
+                    | SetQuantifier::DistinctByName => write!(f, " {set_quantifier}")?,
                     SetQuantifier::None => write!(f, "{set_quantifier}")?,
                 }
                 write!(f, " {right}")?;
@@ -153,6 +169,7 @@ pub enum SetQuantifier {
     Distinct,
     ByName,
     AllByName,
+    DistinctByName,
     None,
 }
 
@@ -163,6 +180,7 @@ impl fmt::Display for SetQuantifier {
             SetQuantifier::Distinct => write!(f, "DISTINCT"),
             SetQuantifier::ByName => write!(f, "BY NAME"),
             SetQuantifier::AllByName => write!(f, "ALL BY NAME"),
+            SetQuantifier::DistinctByName => write!(f, "DISTINCT BY NAME"),
             SetQuantifier::None => write!(f, ""),
         }
     }
@@ -214,7 +232,7 @@ pub struct Select {
     /// WHERE
     pub selection: Option<Expr>,
     /// GROUP BY
-    pub group_by: Vec<Expr>,
+    pub group_by: GroupByExpr,
     /// CLUSTER BY (Hive)
     pub cluster_by: Vec<Expr>,
     /// DISTRIBUTE BY (Hive)
@@ -227,11 +245,18 @@ pub struct Select {
     pub named_window: Vec<NamedWindowDefinition>,
     /// QUALIFY (Snowflake)
     pub qualify: Option<Expr>,
+    /// BigQuery syntax: `SELECT AS VALUE | SELECT AS STRUCT`
+    pub value_table_mode: Option<ValueTableMode>,
 }
 
 impl fmt::Display for Select {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "SELECT")?;
+
+        if let Some(value_table_mode) = self.value_table_mode {
+            write!(f, " {value_table_mode}")?;
+        }
+
         if let Some(ref distinct) = self.distinct {
             write!(f, " {distinct}")?;
         }
@@ -255,8 +280,13 @@ impl fmt::Display for Select {
         if let Some(ref selection) = self.selection {
             write!(f, " WHERE {selection}")?;
         }
-        if !self.group_by.is_empty() {
-            write!(f, " GROUP BY {}", display_comma_separated(&self.group_by))?;
+        match &self.group_by {
+            GroupByExpr::All => write!(f, " GROUP BY ALL")?,
+            GroupByExpr::Expressions(exprs) => {
+                if !exprs.is_empty() {
+                    write!(f, " GROUP BY {}", display_comma_separated(exprs))?;
+                }
+            }
         }
         if !self.cluster_by.is_empty() {
             write!(
@@ -353,7 +383,31 @@ impl fmt::Display for With {
     }
 }
 
-/// A single CTE (used after `WITH`): `alias [(col1, col2, ...)] AS ( query )`
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum CteAsMaterialized {
+    /// The `WITH` statement specifies `AS MATERIALIZED` behavior
+    Materialized,
+    /// The `WITH` statement specifies `AS NOT MATERIALIZED` behavior
+    NotMaterialized,
+}
+
+impl fmt::Display for CteAsMaterialized {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            CteAsMaterialized::Materialized => {
+                write!(f, "MATERIALIZED")?;
+            }
+            CteAsMaterialized::NotMaterialized => {
+                write!(f, "NOT MATERIALIZED")?;
+            }
+        };
+        Ok(())
+    }
+}
+
+/// A single CTE (used after `WITH`): `<alias> [(col1, col2, ...)] AS <materialized> ( <query> )`
 /// The names in the column list before `AS`, when specified, replace the names
 /// of the columns returned by the query. The parser does not validate that the
 /// number of columns in the query matches the number of columns in the query.
@@ -364,11 +418,15 @@ pub struct Cte {
     pub alias: TableAlias,
     pub query: Box<Query>,
     pub from: Option<Ident>,
+    pub materialized: Option<CteAsMaterialized>,
 }
 
 impl fmt::Display for Cte {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} AS ({})", self.alias, self.query)?;
+        match self.materialized.as_ref() {
+            None => write!(f, "{} AS ({})", self.alias, self.query)?,
+            Some(materialized) => write!(f, "{} AS {materialized} ({})", self.alias, self.query)?,
+        };
         if let Some(ref fr) = self.from {
             write!(f, " FROM {fr}")?;
         }
@@ -419,11 +477,13 @@ pub struct WildcardAdditionalOptions {
     /// `[EXCLUDE...]`.
     pub opt_exclude: Option<ExcludeSelectItem>,
     /// `[EXCEPT...]`.
+    ///  Clickhouse syntax: <https://clickhouse.com/docs/en/sql-reference/statements/select#except>
     pub opt_except: Option<ExceptSelectItem>,
     /// `[RENAME ...]`.
     pub opt_rename: Option<RenameSelectItem>,
     /// `[REPLACE]`
     ///  BigQuery syntax: <https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace>
+    ///  Clickhouse syntax: <https://clickhouse.com/docs/en/sql-reference/statements/select#replace>
     pub opt_replace: Option<ReplaceSelectItem>,
 }
 
@@ -646,6 +706,7 @@ impl fmt::Display for TableWithJoins {
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+#[cfg_attr(feature = "visitor", visit(with = "visit_table_factor"))]
 pub enum TableFactor {
     Table {
         #[cfg_attr(feature = "visitor", visit(with = "visit_relation"))]
@@ -661,6 +722,11 @@ pub enum TableFactor {
         args: Option<Vec<FunctionArg>>,
         /// MSSQL-specific `WITH (...)` hints such as NOLOCK.
         with_hints: Vec<Expr>,
+        /// Optional version qualifier to facilitate table time-travel, as
+        /// supported by BigQuery and MSSQL.
+        version: Option<TableVersion>,
+        /// [Partition selection](https://dev.mysql.com/doc/refman/8.0/en/partitioning-selection.html), supported by MySQL.
+        partitions: Vec<Ident>,
     },
     Derived {
         lateral: bool,
@@ -670,6 +736,13 @@ pub enum TableFactor {
     /// `TABLE(<expr>)[ AS <alias> ]`
     TableFunction {
         expr: Expr,
+        alias: Option<TableAlias>,
+    },
+    /// `e.g. LATERAL FLATTEN(<args>)[ AS <alias> ]`
+    Function {
+        lateral: bool,
+        name: ObjectName,
+        args: Vec<FunctionArg>,
         alias: Option<TableAlias>,
     },
     /// ```sql
@@ -688,6 +761,33 @@ pub enum TableFactor {
         with_offset: bool,
         with_offset_alias: Option<Ident>,
     },
+    /// The `JSON_TABLE` table-valued function.
+    /// Part of the SQL standard, but implemented only by MySQL, Oracle, and DB2.
+    ///
+    /// <https://modern-sql.com/blog/2017-06/whats-new-in-sql-2016#json_table>
+    /// <https://dev.mysql.com/doc/refman/8.0/en/json-table-functions.html#function_json-table>
+    ///
+    /// ```sql
+    /// SELECT * FROM JSON_TABLE(
+    ///    '[{"a": 1, "b": 2}, {"a": 3, "b": 4}]',
+    ///    '$[*]' COLUMNS(
+    ///        a INT PATH '$.a' DEFAULT '0' ON EMPTY,
+    ///        b INT PATH '$.b' NULL ON ERROR
+    ///     )
+    /// ) AS jt;
+    /// ````
+    JsonTable {
+        /// The JSON expression to be evaluated. It must evaluate to a json string
+        json_expr: Expr,
+        /// The path to the array or object to be iterated over.
+        /// It must evaluate to a json array or object.
+        json_path: Value,
+        /// The columns to be extracted from each element of the array or object.
+        /// Each column must have a name and a type.
+        columns: Vec<JsonTableColumn>,
+        /// The alias for the table.
+        alias: Option<TableAlias>,
+    },
     /// Represents a parenthesized table factor. The SQL spec only allows a
     /// join expression (`(foo <JOIN> bar [ <JOIN> baz ... ])`) to be nested,
     /// possibly several times.
@@ -702,13 +802,26 @@ pub enum TableFactor {
     /// For example `FROM monthly_sales PIVOT(sum(amount) FOR MONTH IN ('JAN', 'FEB'))`
     /// See <https://docs.snowflake.com/en/sql-reference/constructs/pivot>
     Pivot {
-        #[cfg_attr(feature = "visitor", visit(with = "visit_relation"))]
-        name: ObjectName,
-        table_alias: Option<TableAlias>,
+        table: Box<TableFactor>,
         aggregate_function: Expr, // Function expression
         value_column: Vec<Ident>,
         pivot_values: Vec<Value>,
-        pivot_alias: Option<TableAlias>,
+        alias: Option<TableAlias>,
+    },
+    /// An UNPIVOT operation on a table.
+    ///
+    /// Syntax:
+    /// ```sql
+    /// table UNPIVOT(value FOR name IN (column1, [ column2, ... ])) [ alias ]
+    /// ```
+    ///
+    /// See <https://docs.snowflake.com/en/sql-reference/constructs/unpivot>.
+    Unpivot {
+        table: Box<TableFactor>,
+        value: Ident,
+        name: Ident,
+        columns: Vec<Ident>,
+        alias: Option<TableAlias>,
     },
 }
 
@@ -720,8 +833,13 @@ impl fmt::Display for TableFactor {
                 alias,
                 args,
                 with_hints,
+                version,
+                partitions,
             } => {
                 write!(f, "{name}")?;
+                if !partitions.is_empty() {
+                    write!(f, "PARTITION ({})", display_comma_separated(partitions))?;
+                }
                 if let Some(args) = args {
                     write!(f, "({})", display_comma_separated(args))?;
                 }
@@ -730,6 +848,9 @@ impl fmt::Display for TableFactor {
                 }
                 if !with_hints.is_empty() {
                     write!(f, " WITH ({})", display_comma_separated(with_hints))?;
+                }
+                if let Some(version) = version {
+                    write!(f, "{version}")?;
                 }
                 Ok(())
             }
@@ -742,6 +863,22 @@ impl fmt::Display for TableFactor {
                     write!(f, "LATERAL ")?;
                 }
                 write!(f, "({subquery})")?;
+                if let Some(alias) = alias {
+                    write!(f, " AS {alias}")?;
+                }
+                Ok(())
+            }
+            TableFactor::Function {
+                lateral,
+                name,
+                args,
+                alias,
+            } => {
+                if *lateral {
+                    write!(f, "LATERAL ")?;
+                }
+                write!(f, "{name}")?;
+                write!(f, "({})", display_comma_separated(args))?;
                 if let Some(alias) = alias {
                     write!(f, " AS {alias}")?;
                 }
@@ -773,6 +910,22 @@ impl fmt::Display for TableFactor {
                 }
                 Ok(())
             }
+            TableFactor::JsonTable {
+                json_expr,
+                json_path,
+                columns,
+                alias,
+            } => {
+                write!(
+                    f,
+                    "JSON_TABLE({json_expr}, {json_path} COLUMNS({columns}))",
+                    columns = display_comma_separated(columns)
+                )?;
+                if let Some(alias) = alias {
+                    write!(f, " AS {alias}")?;
+                }
+                Ok(())
+            }
             TableFactor::NestedJoin {
                 table_with_joins,
                 alias,
@@ -784,32 +937,42 @@ impl fmt::Display for TableFactor {
                 Ok(())
             }
             TableFactor::Pivot {
-                name,
-                table_alias,
+                table,
                 aggregate_function,
                 value_column,
                 pivot_values,
-                pivot_alias,
+                alias,
             } => {
-                write!(f, "{}", name)?;
-                if table_alias.is_some() {
-                    write!(f, " AS {}", table_alias.as_ref().unwrap())?;
-                }
                 write!(
                     f,
-                    " PIVOT({} FOR {} IN (",
+                    "{} PIVOT({} FOR {} IN ({}))",
+                    table,
                     aggregate_function,
-                    Expr::CompoundIdentifier(value_column.to_vec())
+                    Expr::CompoundIdentifier(value_column.to_vec()),
+                    display_comma_separated(pivot_values)
                 )?;
-                for value in pivot_values {
-                    write!(f, "{}", value)?;
-                    if !value.eq(pivot_values.last().unwrap()) {
-                        write!(f, ", ")?;
-                    }
+                if alias.is_some() {
+                    write!(f, " AS {}", alias.as_ref().unwrap())?;
                 }
-                write!(f, "))")?;
-                if pivot_alias.is_some() {
-                    write!(f, " AS {}", pivot_alias.as_ref().unwrap())?;
+                Ok(())
+            }
+            TableFactor::Unpivot {
+                table,
+                value,
+                name,
+                columns,
+                alias,
+            } => {
+                write!(
+                    f,
+                    "{} UNPIVOT({} FOR {} IN ({}))",
+                    table,
+                    value,
+                    name,
+                    display_comma_separated(columns)
+                )?;
+                if alias.is_some() {
+                    write!(f, " AS {}", alias.as_ref().unwrap())?;
                 }
                 Ok(())
             }
@@ -830,6 +993,22 @@ impl fmt::Display for TableAlias {
         write!(f, "{}", self.name)?;
         if !self.columns.is_empty() {
             write!(f, " ({})", display_comma_separated(&self.columns))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum TableVersion {
+    ForSystemTimeAsOf(Expr),
+}
+
+impl Display for TableVersion {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TableVersion::ForSystemTimeAsOf(e) => write!(f, " FOR SYSTEM_TIME AS OF {e}")?,
         }
         Ok(())
     }
@@ -1134,9 +1313,21 @@ impl fmt::Display for Distinct {
 #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
 pub struct Top {
     /// SQL semantic equivalent of LIMIT but with same structure as FETCH.
+    /// MSSQL only.
     pub with_ties: bool,
+    /// MSSQL only.
     pub percent: bool,
-    pub quantity: Option<Expr>,
+    pub quantity: Option<TopQuantity>,
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum TopQuantity {
+    // A parenthesized expression. MSSQL only.
+    Expr(Expr),
+    // An unparenthesized integer constant.
+    Constant(u64),
 }
 
 impl fmt::Display for Top {
@@ -1144,7 +1335,12 @@ impl fmt::Display for Top {
         let extension = if self.with_ties { " WITH TIES" } else { "" };
         if let Some(ref quantity) = self.quantity {
             let percent = if self.percent { " PERCENT" } else { "" };
-            write!(f, "TOP ({quantity}){percent}{extension}")
+            match quantity {
+                TopQuantity::Expr(quantity) => write!(f, "TOP ({quantity}){percent}{extension}"),
+                TopQuantity::Constant(quantity) => {
+                    write!(f, "TOP {quantity}{percent}{extension}")
+                }
+            }
         } else {
             write!(f, "TOP{extension}")
         }
@@ -1192,5 +1388,245 @@ impl fmt::Display for SelectInto {
         let table = if self.table { " TABLE" } else { "" };
 
         write!(f, "INTO{}{}{} {}", temporary, unlogged, table, self.name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum GroupByExpr {
+    /// ALL syntax of [Snowflake], and [DuckDB]
+    ///
+    /// [Snowflake]: <https://docs.snowflake.com/en/sql-reference/constructs/group-by#label-group-by-all-columns>
+    /// [DuckDB]:  <https://duckdb.org/docs/sql/query_syntax/groupby.html>
+    All,
+
+    /// Expressions
+    Expressions(Vec<Expr>),
+}
+
+impl fmt::Display for GroupByExpr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            GroupByExpr::All => write!(f, "GROUP BY ALL"),
+            GroupByExpr::Expressions(col_names) => {
+                let col_names = display_comma_separated(col_names);
+                write!(f, "GROUP BY ({col_names})")
+            }
+        }
+    }
+}
+
+/// FOR XML or FOR JSON clause, specific to MSSQL
+/// (formats the output of a query as XML or JSON)
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum ForClause {
+    Browse,
+    Json {
+        for_json: ForJson,
+        root: Option<String>,
+        include_null_values: bool,
+        without_array_wrapper: bool,
+    },
+    Xml {
+        for_xml: ForXml,
+        elements: bool,
+        binary_base64: bool,
+        root: Option<String>,
+        r#type: bool,
+    },
+}
+
+impl fmt::Display for ForClause {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ForClause::Browse => write!(f, "FOR BROWSE"),
+            ForClause::Json {
+                for_json,
+                root,
+                include_null_values,
+                without_array_wrapper,
+            } => {
+                write!(f, "FOR JSON ")?;
+                write!(f, "{}", for_json)?;
+                if let Some(root) = root {
+                    write!(f, ", ROOT('{}')", root)?;
+                }
+                if *include_null_values {
+                    write!(f, ", INCLUDE_NULL_VALUES")?;
+                }
+                if *without_array_wrapper {
+                    write!(f, ", WITHOUT_ARRAY_WRAPPER")?;
+                }
+                Ok(())
+            }
+            ForClause::Xml {
+                for_xml,
+                elements,
+                binary_base64,
+                root,
+                r#type,
+            } => {
+                write!(f, "FOR XML ")?;
+                write!(f, "{}", for_xml)?;
+                if *binary_base64 {
+                    write!(f, ", BINARY BASE64")?;
+                }
+                if *r#type {
+                    write!(f, ", TYPE")?;
+                }
+                if let Some(root) = root {
+                    write!(f, ", ROOT('{}')", root)?;
+                }
+                if *elements {
+                    write!(f, ", ELEMENTS")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum ForXml {
+    Raw(Option<String>),
+    Auto,
+    Explicit,
+    Path(Option<String>),
+}
+
+impl fmt::Display for ForXml {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ForXml::Raw(root) => {
+                write!(f, "RAW")?;
+                if let Some(root) = root {
+                    write!(f, "('{}')", root)?;
+                }
+                Ok(())
+            }
+            ForXml::Auto => write!(f, "AUTO"),
+            ForXml::Explicit => write!(f, "EXPLICIT"),
+            ForXml::Path(root) => {
+                write!(f, "PATH")?;
+                if let Some(root) = root {
+                    write!(f, "('{}')", root)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum ForJson {
+    Auto,
+    Path,
+}
+
+impl fmt::Display for ForJson {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ForJson::Auto => write!(f, "AUTO"),
+            ForJson::Path => write!(f, "PATH"),
+        }
+    }
+}
+
+/// A single column definition in MySQL's `JSON_TABLE` table valued function.
+/// ```sql
+/// SELECT *
+/// FROM JSON_TABLE(
+///     '["a", "b"]',
+///     '$[*]' COLUMNS (
+///         value VARCHAR(20) PATH '$'
+///     )
+/// ) AS jt;
+/// ```
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct JsonTableColumn {
+    /// The name of the column to be extracted.
+    pub name: Ident,
+    /// The type of the column to be extracted.
+    pub r#type: DataType,
+    /// The path to the column to be extracted. Must be a literal string.
+    pub path: Value,
+    /// true if the column is a boolean set to true if the given path exists
+    pub exists: bool,
+    /// The empty handling clause of the column
+    pub on_empty: Option<JsonTableColumnErrorHandling>,
+    /// The error handling clause of the column
+    pub on_error: Option<JsonTableColumnErrorHandling>,
+}
+
+impl fmt::Display for JsonTableColumn {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{} {}{} PATH {}",
+            self.name,
+            self.r#type,
+            if self.exists { " EXISTS" } else { "" },
+            self.path
+        )?;
+        if let Some(on_empty) = &self.on_empty {
+            write!(f, " {} ON EMPTY", on_empty)?;
+        }
+        if let Some(on_error) = &self.on_error {
+            write!(f, " {} ON ERROR", on_error)?;
+        }
+        Ok(())
+    }
+}
+
+/// Stores the error handling clause of a `JSON_TABLE` table valued function:
+/// {NULL | DEFAULT json_string | ERROR} ON {ERROR | EMPTY }
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum JsonTableColumnErrorHandling {
+    Null,
+    Default(Value),
+    Error,
+}
+
+impl fmt::Display for JsonTableColumnErrorHandling {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            JsonTableColumnErrorHandling::Null => write!(f, "NULL"),
+            JsonTableColumnErrorHandling::Default(json_string) => {
+                write!(f, "DEFAULT {}", json_string)
+            }
+            JsonTableColumnErrorHandling::Error => write!(f, "ERROR"),
+        }
+    }
+}
+
+/// BigQuery supports ValueTables which have 2 modes:
+/// `SELECT AS STRUCT`
+/// `SELECT AS VALUE`
+/// <https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#value_tables>
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum ValueTableMode {
+    AsStruct,
+    AsValue,
+}
+
+impl fmt::Display for ValueTableMode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ValueTableMode::AsStruct => write!(f, "AS STRUCT"),
+            ValueTableMode::AsValue => write!(f, "AS VALUE"),
+        }
     }
 }

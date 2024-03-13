@@ -132,147 +132,117 @@ fn test_create_table_macro() {
 
 #[test]
 fn test_select_union_by_name() {
-    let ast = duckdb().verified_query("SELECT * FROM capitals UNION BY NAME SELECT * FROM weather");
-    let expected = Box::<SetExpr>::new(SetExpr::SetOperation {
-        op: SetOperator::Union,
-        set_quantifier: SetQuantifier::ByName,
-        left: Box::<SetExpr>::new(SetExpr::Select(Box::new(Select {
-            distinct: None,
-            top: None,
-            projection: vec![SelectItem::Wildcard(WildcardAdditionalOptions {
-                opt_exclude: None,
-                opt_except: None,
-                opt_rename: None,
-                opt_replace: None,
-            })],
-            into: None,
-            from: vec![TableWithJoins {
-                relation: TableFactor::Table {
-                    name: ObjectName(vec![Ident {
-                        value: "capitals".to_string(),
-                        quote_style: None,
-                    }]),
-                    alias: None,
-                    args: None,
-                    with_hints: vec![],
-                },
-                joins: vec![],
-            }],
-            lateral_views: vec![],
-            selection: None,
-            group_by: vec![],
-            cluster_by: vec![],
-            distribute_by: vec![],
-            sort_by: vec![],
-            having: None,
-            named_window: vec![],
-            qualify: None,
-        }))),
-        right: Box::<SetExpr>::new(SetExpr::Select(Box::new(Select {
-            distinct: None,
-            top: None,
-            projection: vec![SelectItem::Wildcard(WildcardAdditionalOptions {
-                opt_exclude: None,
-                opt_except: None,
-                opt_rename: None,
-                opt_replace: None,
-            })],
-            into: None,
-            from: vec![TableWithJoins {
-                relation: TableFactor::Table {
-                    name: ObjectName(vec![Ident {
-                        value: "weather".to_string(),
-                        quote_style: None,
-                    }]),
-                    alias: None,
-                    args: None,
-                    with_hints: vec![],
-                },
-                joins: vec![],
-            }],
-            lateral_views: vec![],
-            selection: None,
-            group_by: vec![],
-            cluster_by: vec![],
-            distribute_by: vec![],
-            sort_by: vec![],
-            having: None,
-            named_window: vec![],
-            qualify: None,
-        }))),
-    });
+    let q1 = "SELECT * FROM capitals UNION BY NAME SELECT * FROM weather";
+    let q2 = "SELECT * FROM capitals UNION ALL BY NAME SELECT * FROM weather";
+    let q3 = "SELECT * FROM capitals UNION DISTINCT BY NAME SELECT * FROM weather";
 
-    assert_eq!(ast.body, expected);
+    for (ast, expected_quantifier) in &[
+        (duckdb().verified_query(q1), SetQuantifier::ByName),
+        (duckdb().verified_query(q2), SetQuantifier::AllByName),
+        (duckdb().verified_query(q3), SetQuantifier::DistinctByName),
+    ] {
+        let expected = Box::<SetExpr>::new(SetExpr::SetOperation {
+            op: SetOperator::Union,
+            set_quantifier: *expected_quantifier,
+            left: Box::<SetExpr>::new(SetExpr::Select(Box::new(Select {
+                distinct: None,
+                top: None,
+                projection: vec![SelectItem::Wildcard(WildcardAdditionalOptions {
+                    opt_exclude: None,
+                    opt_except: None,
+                    opt_rename: None,
+                    opt_replace: None,
+                })],
+                into: None,
+                from: vec![TableWithJoins {
+                    relation: TableFactor::Table {
+                        name: ObjectName(vec![Ident {
+                            value: "capitals".to_string(),
+                            quote_style: None,
+                        }]),
+                        alias: None,
+                        args: None,
+                        with_hints: vec![],
+                        version: None,
+                        partitions: vec![],
+                    },
+                    joins: vec![],
+                }],
+                lateral_views: vec![],
+                selection: None,
+                group_by: GroupByExpr::Expressions(vec![]),
+                cluster_by: vec![],
+                distribute_by: vec![],
+                sort_by: vec![],
+                having: None,
+                named_window: vec![],
+                qualify: None,
+                value_table_mode: None,
+            }))),
+            right: Box::<SetExpr>::new(SetExpr::Select(Box::new(Select {
+                distinct: None,
+                top: None,
+                projection: vec![SelectItem::Wildcard(WildcardAdditionalOptions {
+                    opt_exclude: None,
+                    opt_except: None,
+                    opt_rename: None,
+                    opt_replace: None,
+                })],
+                into: None,
+                from: vec![TableWithJoins {
+                    relation: TableFactor::Table {
+                        name: ObjectName(vec![Ident {
+                            value: "weather".to_string(),
+                            quote_style: None,
+                        }]),
+                        alias: None,
+                        args: None,
+                        with_hints: vec![],
+                        version: None,
+                        partitions: vec![],
+                    },
+                    joins: vec![],
+                }],
+                lateral_views: vec![],
+                selection: None,
+                group_by: GroupByExpr::Expressions(vec![]),
+                cluster_by: vec![],
+                distribute_by: vec![],
+                sort_by: vec![],
+                having: None,
+                named_window: vec![],
+                qualify: None,
+                value_table_mode: None,
+            }))),
+        });
+        assert_eq!(ast.body, expected);
+    }
+}
 
-    let ast =
-        duckdb().verified_query("SELECT * FROM capitals UNION ALL BY NAME SELECT * FROM weather");
-    let expected = Box::<SetExpr>::new(SetExpr::SetOperation {
-        op: SetOperator::Union,
-        set_quantifier: SetQuantifier::AllByName,
-        left: Box::<SetExpr>::new(SetExpr::Select(Box::new(Select {
-            distinct: None,
-            top: None,
-            projection: vec![SelectItem::Wildcard(WildcardAdditionalOptions {
-                opt_exclude: None,
-                opt_except: None,
-                opt_rename: None,
-                opt_replace: None,
-            })],
-            into: None,
-            from: vec![TableWithJoins {
-                relation: TableFactor::Table {
-                    name: ObjectName(vec![Ident {
-                        value: "capitals".to_string(),
-                        quote_style: None,
-                    }]),
-                    alias: None,
-                    args: None,
-                    with_hints: vec![],
-                },
-                joins: vec![],
-            }],
-            lateral_views: vec![],
-            selection: None,
-            group_by: vec![],
-            cluster_by: vec![],
-            distribute_by: vec![],
-            sort_by: vec![],
-            having: None,
-            named_window: vec![],
-            qualify: None,
-        }))),
-        right: Box::<SetExpr>::new(SetExpr::Select(Box::new(Select {
-            distinct: None,
-            top: None,
-            projection: vec![SelectItem::Wildcard(WildcardAdditionalOptions {
-                opt_exclude: None,
-                opt_except: None,
-                opt_rename: None,
-                opt_replace: None,
-            })],
-            into: None,
-            from: vec![TableWithJoins {
-                relation: TableFactor::Table {
-                    name: ObjectName(vec![Ident {
-                        value: "weather".to_string(),
-                        quote_style: None,
-                    }]),
-                    alias: None,
-                    args: None,
-                    with_hints: vec![],
-                },
-                joins: vec![],
-            }],
-            lateral_views: vec![],
-            selection: None,
-            group_by: vec![],
-            cluster_by: vec![],
-            distribute_by: vec![],
-            sort_by: vec![],
-            having: None,
-            named_window: vec![],
-            qualify: None,
-        }))),
-    });
-    assert_eq!(ast.body, expected);
+#[test]
+fn test_duckdb_install() {
+    let stmt = duckdb().verified_stmt("INSTALL tpch");
+    assert_eq!(
+        stmt,
+        Statement::Install {
+            extension_name: Ident {
+                value: "tpch".to_string(),
+                quote_style: None
+            }
+        }
+    );
+}
+
+#[test]
+fn test_duckdb_load_extension() {
+    let stmt = duckdb().verified_stmt("LOAD my_extension");
+    assert_eq!(
+        Statement::Load {
+            extension_name: Ident {
+                value: "my_extension".to_string(),
+                quote_style: None
+            }
+        },
+        stmt
+    );
 }

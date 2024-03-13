@@ -14,11 +14,12 @@
 //! Test SQL syntax specific to MySQL. The parser based on the generic dialect
 //! is also tested (on the inputs it can handle).
 
-use sqlparser::ast::Expr;
-use sqlparser::ast::Value;
+use matches::assert_matches;
+
+use sqlparser::ast::MysqlInsertPriority::{Delayed, HighPriority, LowPriority};
 use sqlparser::ast::*;
 use sqlparser::dialect::{GenericDialect, MySqlDialect};
-use sqlparser::parser::ParserOptions;
+use sqlparser::parser::{ParserError, ParserOptions};
 use sqlparser::tokenizer::Token;
 use test_utils::*;
 
@@ -42,6 +43,176 @@ fn parse_literal_string() {
     assert_eq!(
         &Expr::Value(Value::DoubleQuotedString("double".to_string())),
         expr_from_projection(&select.projection[1])
+    );
+}
+
+#[test]
+fn parse_flush() {
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH OPTIMIZER_COSTS"),
+        Statement::Flush {
+            location: None,
+            object_type: FlushType::OptimizerCosts,
+            channel: None,
+            read_lock: false,
+            export: false,
+            tables: vec![]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH BINARY LOGS"),
+        Statement::Flush {
+            location: None,
+            object_type: FlushType::BinaryLogs,
+            channel: None,
+            read_lock: false,
+            export: false,
+            tables: vec![]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH ENGINE LOGS"),
+        Statement::Flush {
+            location: None,
+            object_type: FlushType::EngineLogs,
+            channel: None,
+            read_lock: false,
+            export: false,
+            tables: vec![]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH ERROR LOGS"),
+        Statement::Flush {
+            location: None,
+            object_type: FlushType::ErrorLogs,
+            channel: None,
+            read_lock: false,
+            export: false,
+            tables: vec![]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH NO_WRITE_TO_BINLOG GENERAL LOGS"),
+        Statement::Flush {
+            location: Some(FlushLocation::NoWriteToBinlog),
+            object_type: FlushType::GeneralLogs,
+            channel: None,
+            read_lock: false,
+            export: false,
+            tables: vec![]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH RELAY LOGS FOR CHANNEL test"),
+        Statement::Flush {
+            location: None,
+            object_type: FlushType::RelayLogs,
+            channel: Some("test".to_string()),
+            read_lock: false,
+            export: false,
+            tables: vec![]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH LOCAL SLOW LOGS"),
+        Statement::Flush {
+            location: Some(FlushLocation::Local),
+            object_type: FlushType::SlowLogs,
+            channel: None,
+            read_lock: false,
+            export: false,
+            tables: vec![]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH TABLES `mek`.`table1`, table2"),
+        Statement::Flush {
+            location: None,
+            object_type: FlushType::Tables,
+            channel: None,
+            read_lock: false,
+            export: false,
+            tables: vec![
+                ObjectName(vec![
+                    Ident {
+                        value: "mek".to_string(),
+                        quote_style: Some('`')
+                    },
+                    Ident {
+                        value: "table1".to_string(),
+                        quote_style: Some('`')
+                    }
+                ]),
+                ObjectName(vec![Ident {
+                    value: "table2".to_string(),
+                    quote_style: None
+                }])
+            ]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH TABLES WITH READ LOCK"),
+        Statement::Flush {
+            location: None,
+            object_type: FlushType::Tables,
+            channel: None,
+            read_lock: true,
+            export: false,
+            tables: vec![]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH TABLES `mek`.`table1`, table2 WITH READ LOCK"),
+        Statement::Flush {
+            location: None,
+            object_type: FlushType::Tables,
+            channel: None,
+            read_lock: true,
+            export: false,
+            tables: vec![
+                ObjectName(vec![
+                    Ident {
+                        value: "mek".to_string(),
+                        quote_style: Some('`')
+                    },
+                    Ident {
+                        value: "table1".to_string(),
+                        quote_style: Some('`')
+                    }
+                ]),
+                ObjectName(vec![Ident {
+                    value: "table2".to_string(),
+                    quote_style: None
+                }])
+            ]
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("FLUSH TABLES `mek`.`table1`, table2 FOR EXPORT"),
+        Statement::Flush {
+            location: None,
+            object_type: FlushType::Tables,
+            channel: None,
+            read_lock: false,
+            export: true,
+            tables: vec![
+                ObjectName(vec![
+                    Ident {
+                        value: "mek".to_string(),
+                        quote_style: Some('`')
+                    },
+                    Ident {
+                        value: "table1".to_string(),
+                        quote_style: Some('`')
+                    }
+                ]),
+                ObjectName(vec![Ident {
+                    value: "table2".to_string(),
+                    quote_style: None
+                }])
+            ]
+        }
     );
 }
 
@@ -113,6 +284,36 @@ fn parse_show_columns() {
     mysql_and_generic().one_statement_parses_to(
         "SHOW COLUMNS FROM mytable FROM mydb",
         "SHOW COLUMNS FROM mydb.mytable",
+    );
+}
+
+#[test]
+fn parse_show_status() {
+    assert_eq!(
+        mysql_and_generic().verified_stmt("SHOW SESSION STATUS LIKE 'ssl_cipher'"),
+        Statement::ShowStatus {
+            filter: Some(ShowStatementFilter::Like("ssl_cipher".into())),
+            session: true,
+            global: false
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("SHOW GLOBAL STATUS LIKE 'ssl_cipher'"),
+        Statement::ShowStatus {
+            filter: Some(ShowStatementFilter::Like("ssl_cipher".into())),
+            session: false,
+            global: true
+        }
+    );
+    assert_eq!(
+        mysql_and_generic().verified_stmt("SHOW STATUS WHERE value = 2"),
+        Statement::ShowStatus {
+            filter: Some(ShowStatementFilter::Where(
+                mysql_and_generic().verified_expr("value = 2")
+            )),
+            session: false,
+            global: false
+        }
     );
 }
 
@@ -201,7 +402,7 @@ fn parse_show_extended_full() {
 fn parse_show_create() {
     let obj_name = ObjectName(vec![Ident::new("myident")]);
 
-    for obj_type in &vec![
+    for obj_type in &[
         ShowCreateObject::Table,
         ShowCreateObject::Trigger,
         ShowCreateObject::Event,
@@ -279,7 +480,10 @@ fn parse_create_table_auto_increment() {
                     options: vec![
                         ColumnOptionDef {
                             name: None,
-                            option: ColumnOption::Unique { is_primary: true },
+                            option: ColumnOption::Unique {
+                                is_primary: true,
+                                characteristics: None
+                            },
                         },
                         ColumnOptionDef {
                             name: None,
@@ -293,6 +497,107 @@ fn parse_create_table_auto_increment() {
             );
         }
         _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_create_table_unique_key() {
+    let sql = "CREATE TABLE foo (id INT PRIMARY KEY AUTO_INCREMENT, bar INT NOT NULL, UNIQUE KEY bar_key (bar))";
+    let canonical = "CREATE TABLE foo (id INT PRIMARY KEY AUTO_INCREMENT, bar INT NOT NULL, CONSTRAINT bar_key UNIQUE (bar))";
+    match mysql().one_statement_parses_to(sql, canonical) {
+        Statement::CreateTable {
+            name,
+            columns,
+            constraints,
+            ..
+        } => {
+            assert_eq!(name.to_string(), "foo");
+            assert_eq!(
+                vec![TableConstraint::Unique {
+                    name: Some(Ident::new("bar_key")),
+                    columns: vec![Ident::new("bar")],
+                    is_primary: false,
+                    characteristics: None,
+                }],
+                constraints
+            );
+            assert_eq!(
+                vec![
+                    ColumnDef {
+                        name: Ident::new("id"),
+                        data_type: DataType::Int(None),
+                        collation: None,
+                        options: vec![
+                            ColumnOptionDef {
+                                name: None,
+                                option: ColumnOption::Unique {
+                                    is_primary: true,
+                                    characteristics: None
+                                },
+                            },
+                            ColumnOptionDef {
+                                name: None,
+                                option: ColumnOption::DialectSpecific(vec![Token::make_keyword(
+                                    "AUTO_INCREMENT"
+                                )]),
+                            },
+                        ],
+                    },
+                    ColumnDef {
+                        name: Ident::new("bar"),
+                        data_type: DataType::Int(None),
+                        collation: None,
+                        options: vec![ColumnOptionDef {
+                            name: None,
+                            option: ColumnOption::NotNull,
+                        },],
+                    },
+                ],
+                columns
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_create_table_comment() {
+    let canonical = "CREATE TABLE foo (bar INT) COMMENT 'baz'";
+    let with_equal = "CREATE TABLE foo (bar INT) COMMENT = 'baz'";
+
+    for sql in [canonical, with_equal] {
+        match mysql().one_statement_parses_to(sql, canonical) {
+            Statement::CreateTable { name, comment, .. } => {
+                assert_eq!(name.to_string(), "foo");
+                assert_eq!(comment.expect("Should exist").to_string(), "baz");
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn parse_create_table_auto_increment_offset() {
+    let canonical =
+        "CREATE TABLE foo (bar INT NOT NULL AUTO_INCREMENT) ENGINE=InnoDB AUTO_INCREMENT 123";
+    let with_equal =
+        "CREATE TABLE foo (bar INT NOT NULL AUTO_INCREMENT) ENGINE=InnoDB AUTO_INCREMENT=123";
+
+    for sql in [canonical, with_equal] {
+        match mysql().one_statement_parses_to(sql, canonical) {
+            Statement::CreateTable {
+                name,
+                auto_increment_offset,
+                ..
+            } => {
+                assert_eq!(name.to_string(), "foo");
+                assert_eq!(
+                    auto_increment_offset.expect("Should exist").to_string(),
+                    "123"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -410,6 +715,22 @@ fn parse_create_table_comment_character_set() {
 }
 
 #[test]
+fn parse_create_table_gencol() {
+    let sql_default = "CREATE TABLE t1 (a INT, b INT GENERATED ALWAYS AS (a * 2))";
+    mysql_and_generic().verified_stmt(sql_default);
+
+    let sql_virt = "CREATE TABLE t1 (a INT, b INT GENERATED ALWAYS AS (a * 2) VIRTUAL)";
+    mysql_and_generic().verified_stmt(sql_virt);
+
+    let sql_stored = "CREATE TABLE t1 (a INT, b INT GENERATED ALWAYS AS (a * 2) STORED)";
+    mysql_and_generic().verified_stmt(sql_stored);
+
+    mysql_and_generic().verified_stmt("CREATE TABLE t1 (a INT, b INT AS (a * 2))");
+    mysql_and_generic().verified_stmt("CREATE TABLE t1 (a INT, b INT AS (a * 2) VIRTUAL)");
+    mysql_and_generic().verified_stmt("CREATE TABLE t1 (a INT, b INT AS (a * 2) STORED)");
+}
+
+#[test]
 fn parse_quote_identifiers() {
     let sql = "CREATE TABLE `PRIMARY` (`BEGIN` INT PRIMARY KEY)";
     match mysql().verified_stmt(sql) {
@@ -422,7 +743,10 @@ fn parse_quote_identifiers() {
                     collation: None,
                     options: vec![ColumnOptionDef {
                         name: None,
-                        option: ColumnOption::Unique { is_primary: true },
+                        option: ColumnOption::Unique {
+                            is_primary: true,
+                            characteristics: None
+                        },
                     }],
                 }],
                 columns
@@ -454,19 +778,22 @@ fn parse_escaped_quote_identifiers_with_escape() {
                 from: vec![],
                 lateral_views: vec![],
                 selection: None,
-                group_by: vec![],
+                group_by: GroupByExpr::Expressions(vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
-                qualify: None
+                qualify: None,
+                value_table_mode: None,
             }))),
             order_by: vec![],
             limit: None,
+            limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
+            for_clause: None,
         }))
     );
 }
@@ -496,19 +823,22 @@ fn parse_escaped_quote_identifiers_with_no_escape() {
                 from: vec![],
                 lateral_views: vec![],
                 selection: None,
-                group_by: vec![],
+                group_by: GroupByExpr::Expressions(vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
-                qualify: None
+                qualify: None,
+                value_table_mode: None,
             }))),
             order_by: vec![],
             limit: None,
+            limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
+            for_clause: None,
         }))
     );
 }
@@ -535,19 +865,22 @@ fn parse_escaped_backticks_with_escape() {
                 from: vec![],
                 lateral_views: vec![],
                 selection: None,
-                group_by: vec![],
+                group_by: GroupByExpr::Expressions(vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
-                qualify: None
+                qualify: None,
+                value_table_mode: None,
             }))),
             order_by: vec![],
             limit: None,
+            limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
+            for_clause: None,
         }))
     );
 }
@@ -574,30 +907,33 @@ fn parse_escaped_backticks_with_no_escape() {
                 from: vec![],
                 lateral_views: vec![],
                 selection: None,
-                group_by: vec![],
+                group_by: GroupByExpr::Expressions(vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
-                qualify: None
+                qualify: None,
+                value_table_mode: None,
             }))),
             order_by: vec![],
             limit: None,
+            limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
+            for_clause: None,
         }))
     );
 }
 
 #[test]
 fn parse_unterminated_escape() {
-    let sql = r#"SELECT 'I\'m not fine\'"#;
+    let sql = r"SELECT 'I\'m not fine\'";
     let result = std::panic::catch_unwind(|| mysql().one_statement_parses_to(sql, ""));
     assert!(result.is_err());
 
-    let sql = r#"SELECT 'I\\'m not fine'"#;
+    let sql = r"SELECT 'I\\'m not fine'";
     let result = std::panic::catch_unwind(|| mysql().one_statement_parses_to(sql, ""));
     assert!(result.is_err());
 }
@@ -625,7 +961,7 @@ fn parse_escaped_string_with_escape() {
             _ => unreachable!(),
         };
     }
-    let sql = r#"SELECT 'I\'m fine'"#;
+    let sql = r"SELECT 'I\'m fine'";
     assert_mysql_query_value(sql, "I'm fine");
 
     let sql = r#"SELECT 'I''m fine'"#;
@@ -634,7 +970,7 @@ fn parse_escaped_string_with_escape() {
     let sql = r#"SELECT 'I\"m fine'"#;
     assert_mysql_query_value(sql, "I\"m fine");
 
-    let sql = r#"SELECT 'Testing: \0 \\ \% \_ \b \n \r \t \Z \a \ '"#;
+    let sql = r"SELECT 'Testing: \0 \\ \% \_ \b \n \r \t \Z \a \ '";
     assert_mysql_query_value(sql, "Testing: \0 \\ % _ \u{8} \n \r \t \u{1a} a  ");
 }
 
@@ -661,8 +997,8 @@ fn parse_escaped_string_with_no_escape() {
             _ => unreachable!(),
         };
     }
-    let sql = r#"SELECT 'I\'m fine'"#;
-    assert_mysql_query_value(sql, r#"I\'m fine"#);
+    let sql = r"SELECT 'I\'m fine'";
+    assert_mysql_query_value(sql, r"I\'m fine");
 
     let sql = r#"SELECT 'I''m fine'"#;
     assert_mysql_query_value(sql, r#"I''m fine"#);
@@ -670,8 +1006,8 @@ fn parse_escaped_string_with_no_escape() {
     let sql = r#"SELECT 'I\"m fine'"#;
     assert_mysql_query_value(sql, r#"I\"m fine"#);
 
-    let sql = r#"SELECT 'Testing: \0 \\ \% \_ \b \n \r \t \Z \a \ '"#;
-    assert_mysql_query_value(sql, r#"Testing: \0 \\ \% \_ \b \n \r \t \Z \a \ "#);
+    let sql = r"SELECT 'Testing: \0 \\ \% \_ \b \n \r \t \Z \a \ '";
+    assert_mysql_query_value(sql, r"Testing: \0 \\ \% \_ \b \n \r \t \Z \a \ ");
 }
 
 #[test]
@@ -682,7 +1018,7 @@ fn check_roundtrip_of_escaped_string() {
         dialects: vec![Box::new(MySqlDialect {})],
         options: options.clone(),
     }
-    .verified_stmt(r#"SELECT 'I\'m fine'"#);
+    .verified_stmt(r"SELECT 'I\'m fine'");
     TestedDialects {
         dialects: vec![Box::new(MySqlDialect {})],
         options: options.clone(),
@@ -692,12 +1028,12 @@ fn check_roundtrip_of_escaped_string() {
         dialects: vec![Box::new(MySqlDialect {})],
         options: options.clone(),
     }
-    .verified_stmt(r#"SELECT 'I\\\'m fine'"#);
+    .verified_stmt(r"SELECT 'I\\\'m fine'");
     TestedDialects {
         dialects: vec![Box::new(MySqlDialect {})],
         options: options.clone(),
     }
-    .verified_stmt(r#"SELECT 'I\\\'m fine'"#);
+    .verified_stmt(r"SELECT 'I\\\'m fine'");
 
     TestedDialects {
         dialects: vec![Box::new(MySqlDialect {})],
@@ -835,7 +1171,7 @@ fn parse_simple_insert() {
             assert_eq!(vec![Ident::new("title"), Ident::new("priority")], columns);
             assert!(on.is_none());
             assert_eq!(
-                Box::new(Query {
+                Some(Box::new(Query {
                     with: None,
                     body: Box::new(SetExpr::Values(Values {
                         explicit_row: false,
@@ -858,10 +1194,284 @@ fn parse_simple_insert() {
                     })),
                     order_by: vec![],
                     limit: None,
+                    limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
-                }),
+                    for_clause: None,
+                })),
+                source
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_ignore_insert() {
+    let sql = r"INSERT IGNORE INTO tasks (title, priority) VALUES ('Test Some Inserts', 1)";
+
+    match mysql_and_generic().verified_stmt(sql) {
+        Statement::Insert {
+            table_name,
+            columns,
+            source,
+            on,
+            ignore,
+            ..
+        } => {
+            assert_eq!(ObjectName(vec![Ident::new("tasks")]), table_name);
+            assert_eq!(vec![Ident::new("title"), Ident::new("priority")], columns);
+            assert!(on.is_none());
+            assert!(ignore);
+            assert_eq!(
+                Some(Box::new(Query {
+                    with: None,
+                    body: Box::new(SetExpr::Values(Values {
+                        explicit_row: false,
+                        rows: vec![vec![
+                            Expr::Value(Value::SingleQuotedString("Test Some Inserts".to_string())),
+                            Expr::Value(number("1"))
+                        ]]
+                    })),
+                    order_by: vec![],
+                    limit: None,
+                    limit_by: vec![],
+                    offset: None,
+                    fetch: None,
+                    locks: vec![],
+                    for_clause: None,
+                })),
+                source
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_priority_insert() {
+    let sql = r"INSERT HIGH_PRIORITY INTO tasks (title, priority) VALUES ('Test Some Inserts', 1)";
+
+    match mysql_and_generic().verified_stmt(sql) {
+        Statement::Insert {
+            table_name,
+            columns,
+            source,
+            on,
+            priority,
+            ..
+        } => {
+            assert_eq!(ObjectName(vec![Ident::new("tasks")]), table_name);
+            assert_eq!(vec![Ident::new("title"), Ident::new("priority")], columns);
+            assert!(on.is_none());
+            assert_eq!(priority, Some(HighPriority));
+            assert_eq!(
+                Some(Box::new(Query {
+                    with: None,
+                    body: Box::new(SetExpr::Values(Values {
+                        explicit_row: false,
+                        rows: vec![vec![
+                            Expr::Value(Value::SingleQuotedString("Test Some Inserts".to_string())),
+                            Expr::Value(number("1"))
+                        ]]
+                    })),
+                    order_by: vec![],
+                    limit: None,
+                    limit_by: vec![],
+                    offset: None,
+                    fetch: None,
+                    locks: vec![],
+                    for_clause: None,
+                })),
+                source
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let sql2 = r"INSERT LOW_PRIORITY INTO tasks (title, priority) VALUES ('Test Some Inserts', 1)";
+
+    match mysql().verified_stmt(sql2) {
+        Statement::Insert {
+            table_name,
+            columns,
+            source,
+            on,
+            priority,
+            ..
+        } => {
+            assert_eq!(ObjectName(vec![Ident::new("tasks")]), table_name);
+            assert_eq!(vec![Ident::new("title"), Ident::new("priority")], columns);
+            assert!(on.is_none());
+            assert_eq!(priority, Some(LowPriority));
+            assert_eq!(
+                Some(Box::new(Query {
+                    with: None,
+                    body: Box::new(SetExpr::Values(Values {
+                        explicit_row: false,
+                        rows: vec![vec![
+                            Expr::Value(Value::SingleQuotedString("Test Some Inserts".to_string())),
+                            Expr::Value(number("1"))
+                        ]]
+                    })),
+                    order_by: vec![],
+                    limit: None,
+                    limit_by: vec![],
+                    offset: None,
+                    fetch: None,
+                    locks: vec![],
+                    for_clause: None,
+                })),
+                source
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_insert_as() {
+    let sql = r"INSERT INTO `table` (`date`) VALUES ('2024-01-01') AS `alias`";
+    match mysql_and_generic().verified_stmt(sql) {
+        Statement::Insert {
+            table_name,
+            columns,
+            source,
+            insert_alias,
+            ..
+        } => {
+            assert_eq!(
+                ObjectName(vec![Ident::with_quote('`', "table")]),
+                table_name
+            );
+            assert_eq!(vec![Ident::with_quote('`', "date")], columns);
+            let insert_alias = insert_alias.unwrap();
+
+            assert_eq!(
+                ObjectName(vec![Ident::with_quote('`', "alias")]),
+                insert_alias.row_alias
+            );
+            assert_eq!(Some(vec![]), insert_alias.col_aliases);
+            assert_eq!(
+                Some(Box::new(Query {
+                    with: None,
+                    body: Box::new(SetExpr::Values(Values {
+                        explicit_row: false,
+                        rows: vec![vec![Expr::Value(Value::SingleQuotedString(
+                            "2024-01-01".to_string()
+                        ))]]
+                    })),
+                    order_by: vec![],
+                    limit: None,
+                    limit_by: vec![],
+                    offset: None,
+                    fetch: None,
+                    locks: vec![],
+                    for_clause: None,
+                })),
+                source
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let sql = r"INSERT INTO `table` (`date`) VALUES ('2024-01-01') AS `alias` ()";
+    assert!(matches!(
+        mysql_and_generic().parse_sql_statements(sql),
+        Err(ParserError::ParserError(_))
+    ));
+
+    let sql = r"INSERT INTO `table` (`id`, `date`) VALUES (1, '2024-01-01') AS `alias` (`mek_id`, `mek_date`)";
+    match mysql_and_generic().verified_stmt(sql) {
+        Statement::Insert {
+            table_name,
+            columns,
+            source,
+            insert_alias,
+            ..
+        } => {
+            assert_eq!(
+                ObjectName(vec![Ident::with_quote('`', "table")]),
+                table_name
+            );
+            assert_eq!(
+                vec![Ident::with_quote('`', "id"), Ident::with_quote('`', "date")],
+                columns
+            );
+            let insert_alias = insert_alias.unwrap();
+            assert_eq!(
+                ObjectName(vec![Ident::with_quote('`', "alias")]),
+                insert_alias.row_alias
+            );
+            assert_eq!(
+                Some(vec![
+                    Ident::with_quote('`', "mek_id"),
+                    Ident::with_quote('`', "mek_date")
+                ]),
+                insert_alias.col_aliases
+            );
+            assert_eq!(
+                Some(Box::new(Query {
+                    with: None,
+                    body: Box::new(SetExpr::Values(Values {
+                        explicit_row: false,
+                        rows: vec![vec![
+                            Expr::Value(number("1")),
+                            Expr::Value(Value::SingleQuotedString("2024-01-01".to_string()))
+                        ]]
+                    })),
+                    order_by: vec![],
+                    limit: None,
+                    limit_by: vec![],
+                    offset: None,
+                    fetch: None,
+                    locks: vec![],
+                    for_clause: None,
+                })),
+                source
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_replace_insert() {
+    let sql = r"REPLACE DELAYED INTO tasks (title, priority) VALUES ('Test Some Inserts', 1)";
+    match mysql().verified_stmt(sql) {
+        Statement::Insert {
+            table_name,
+            columns,
+            source,
+            on,
+            replace_into,
+            priority,
+            ..
+        } => {
+            assert_eq!(ObjectName(vec![Ident::new("tasks")]), table_name);
+            assert_eq!(vec![Ident::new("title"), Ident::new("priority")], columns);
+            assert!(on.is_none());
+            assert!(replace_into);
+            assert_eq!(priority, Some(Delayed));
+            assert_eq!(
+                Some(Box::new(Query {
+                    with: None,
+                    body: Box::new(SetExpr::Values(Values {
+                        explicit_row: false,
+                        rows: vec![vec![
+                            Expr::Value(Value::SingleQuotedString("Test Some Inserts".to_string())),
+                            Expr::Value(number("1"))
+                        ]]
+                    })),
+                    order_by: vec![],
+                    limit: None,
+                    limit_by: vec![],
+                    offset: None,
+                    fetch: None,
+                    locks: vec![],
+                    for_clause: None,
+                })),
                 source
             );
         }
@@ -885,7 +1495,7 @@ fn parse_empty_row_insert() {
             assert!(columns.is_empty());
             assert!(on.is_none());
             assert_eq!(
-                Box::new(Query {
+                Some(Box::new(Query {
                     with: None,
                     body: Box::new(SetExpr::Values(Values {
                         explicit_row: false,
@@ -893,10 +1503,12 @@ fn parse_empty_row_insert() {
                     })),
                     order_by: vec![],
                     limit: None,
+                    limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
-                }),
+                    for_clause: None,
+                })),
                 source
             );
         }
@@ -932,7 +1544,7 @@ fn parse_insert_with_on_duplicate_update() {
                 columns
             );
             assert_eq!(
-                Box::new(Query {
+                Some(Box::new(Query {
                     with: None,
                     body: Box::new(SetExpr::Values(Values {
                         explicit_row: false,
@@ -951,10 +1563,12 @@ fn parse_insert_with_on_duplicate_update() {
                     })),
                     order_by: vec![],
                     limit: None,
+                    limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
-                }),
+                    for_clause: None,
+                })),
                 source
             );
             assert_eq!(
@@ -966,6 +1580,8 @@ fn parse_insert_with_on_duplicate_update() {
                             args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
                                 Expr::Identifier(Ident::new("description"))
                             ))],
+                            null_treatment: None,
+                            filter: None,
                             over: None,
                             distinct: false,
                             special: false,
@@ -979,6 +1595,8 @@ fn parse_insert_with_on_duplicate_update() {
                             args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
                                 Expr::Identifier(Ident::new("perm_create"))
                             ))],
+                            null_treatment: None,
+                            filter: None,
                             over: None,
                             distinct: false,
                             special: false,
@@ -992,6 +1610,8 @@ fn parse_insert_with_on_duplicate_update() {
                             args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
                                 Expr::Identifier(Ident::new("perm_read"))
                             ))],
+                            null_treatment: None,
+                            filter: None,
                             over: None,
                             distinct: false,
                             special: false,
@@ -1005,6 +1625,8 @@ fn parse_insert_with_on_duplicate_update() {
                             args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
                                 Expr::Identifier(Ident::new("perm_update"))
                             ))],
+                            null_treatment: None,
+                            filter: None,
                             over: None,
                             distinct: false,
                             special: false,
@@ -1018,6 +1640,8 @@ fn parse_insert_with_on_duplicate_update() {
                             args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
                                 Expr::Identifier(Ident::new("perm_delete"))
                             ))],
+                            null_treatment: None,
+                            filter: None,
                             over: None,
                             distinct: false,
                             special: false,
@@ -1052,18 +1676,21 @@ fn parse_select_with_numeric_prefix_column_name() {
                             alias: None,
                             args: None,
                             with_hints: vec![],
+                            version: None,
+                            partitions: vec![],
                         },
                         joins: vec![]
                     }],
                     lateral_views: vec![],
                     selection: None,
-                    group_by: vec![],
+                    group_by: GroupByExpr::Expressions(vec![]),
                     cluster_by: vec![],
                     distribute_by: vec![],
                     sort_by: vec![],
                     having: None,
                     named_window: vec![],
                     qualify: None,
+                    value_table_mode: None,
                 })))
             );
         }
@@ -1100,18 +1727,21 @@ fn parse_select_with_concatenation_of_exp_number_and_numeric_prefix_column() {
                             alias: None,
                             args: None,
                             with_hints: vec![],
+                            version: None,
+                            partitions: vec![],
                         },
                         joins: vec![]
                     }],
                     lateral_views: vec![],
                     selection: None,
-                    group_by: vec![],
+                    group_by: GroupByExpr::Expressions(vec![]),
                     cluster_by: vec![],
                     distribute_by: vec![],
                     sort_by: vec![],
                     having: None,
                     named_window: vec![],
                     qualify: None,
+                    value_table_mode: None,
                 })))
             );
         }
@@ -1159,6 +1789,8 @@ fn parse_update_with_joins() {
                         }),
                         args: None,
                         with_hints: vec![],
+                        version: None,
+                        partitions: vec![],
                     },
                     joins: vec![Join {
                         relation: TableFactor::Table {
@@ -1169,6 +1801,8 @@ fn parse_update_with_joins() {
                             }),
                             args: None,
                             with_hints: vec![],
+                            version: None,
+                            partitions: vec![],
                         },
                         join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
                             left: Box::new(Expr::CompoundIdentifier(vec![
@@ -1210,16 +1844,43 @@ fn parse_update_with_joins() {
 }
 
 #[test]
-fn parse_alter_table_drop_primary_key() {
-    match mysql_and_generic().verified_stmt("ALTER TABLE tab DROP PRIMARY KEY") {
-        Statement::AlterTable {
-            name,
-            operation: AlterTableOperation::DropPrimaryKey,
-        } => {
-            assert_eq!("tab", name.to_string());
+fn parse_delete_with_order_by() {
+    let sql = "DELETE FROM customers ORDER BY id DESC";
+    match mysql().verified_stmt(sql) {
+        Statement::Delete { order_by, .. } => {
+            assert_eq!(
+                vec![OrderByExpr {
+                    expr: Expr::Identifier(Ident {
+                        value: "id".to_owned(),
+                        quote_style: None
+                    }),
+                    asc: Some(false),
+                    nulls_first: None,
+                }],
+                order_by
+            );
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn parse_delete_with_limit() {
+    let sql = "DELETE FROM customers LIMIT 100";
+    match mysql().verified_stmt(sql) {
+        Statement::Delete { limit, .. } => {
+            assert_eq!(Some(Expr::Value(number("100"))), limit);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_alter_table_drop_primary_key() {
+    assert_matches!(
+        alter_table_op(mysql_and_generic().verified_stmt("ALTER TABLE tab DROP PRIMARY KEY")),
+        AlterTableOperation::DropPrimaryKey
+    );
 }
 
 #[test]
@@ -1233,22 +1894,16 @@ fn parse_alter_table_change_column() {
     };
 
     let sql1 = "ALTER TABLE orders CHANGE COLUMN description desc TEXT NOT NULL";
-    match mysql().verified_stmt(sql1) {
-        Statement::AlterTable { name, operation } => {
-            assert_eq!(expected_name, name);
-            assert_eq!(expected_operation, operation);
-        }
-        _ => unreachable!(),
-    }
+    let operation =
+        alter_table_op_with_name(mysql().verified_stmt(sql1), &expected_name.to_string());
+    assert_eq!(expected_operation, operation);
 
     let sql2 = "ALTER TABLE orders CHANGE description desc TEXT NOT NULL";
-    match mysql().one_statement_parses_to(sql2, sql1) {
-        Statement::AlterTable { name, operation } => {
-            assert_eq!(expected_name, name);
-            assert_eq!(expected_operation, operation);
-        }
-        _ => unreachable!(),
-    }
+    let operation = alter_table_op_with_name(
+        mysql().one_statement_parses_to(sql2, sql1),
+        &expected_name.to_string(),
+    );
+    assert_eq!(expected_operation, operation);
 }
 
 #[test]
@@ -1256,7 +1911,7 @@ fn parse_substring_in_select() {
     let sql = "SELECT DISTINCT SUBSTRING(description, 0, 1) FROM test";
     match mysql().one_statement_parses_to(
         sql,
-        "SELECT DISTINCT SUBSTRING(description FROM 0 FOR 1) FROM test",
+        "SELECT DISTINCT SUBSTRING(description, 0, 1) FROM test",
     ) {
         Statement::Query(query) => {
             assert_eq!(
@@ -1271,7 +1926,8 @@ fn parse_substring_in_select() {
                                 quote_style: None
                             })),
                             substring_from: Some(Box::new(Expr::Value(number("0")))),
-                            substring_for: Some(Box::new(Expr::Value(number("1"))))
+                            substring_for: Some(Box::new(Expr::Value(number("1")))),
+                            special: true,
                         })],
                         into: None,
                         from: vec![TableWithJoins {
@@ -1282,25 +1938,30 @@ fn parse_substring_in_select() {
                                 }]),
                                 alias: None,
                                 args: None,
-                                with_hints: vec![]
+                                with_hints: vec![],
+                                version: None,
+                                partitions: vec![],
                             },
                             joins: vec![]
                         }],
                         lateral_views: vec![],
                         selection: None,
-                        group_by: vec![],
+                        group_by: GroupByExpr::Expressions(vec![]),
                         cluster_by: vec![],
                         distribute_by: vec![],
                         sort_by: vec![],
                         having: None,
                         named_window: vec![],
-                        qualify: None
+                        qualify: None,
+                        value_table_mode: None,
                     }))),
                     order_by: vec![],
                     limit: None,
+                    limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
+                    for_clause: None,
                 }),
                 query
             );
@@ -1314,6 +1975,24 @@ fn parse_show_variables() {
     mysql_and_generic().verified_stmt("SHOW VARIABLES");
     mysql_and_generic().verified_stmt("SHOW VARIABLES LIKE 'admin%'");
     mysql_and_generic().verified_stmt("SHOW VARIABLES WHERE value = '3306'");
+    mysql_and_generic().verified_stmt("SHOW GLOBAL VARIABLES");
+    mysql_and_generic().verified_stmt("SHOW GLOBAL VARIABLES LIKE 'admin%'");
+    mysql_and_generic().verified_stmt("SHOW GLOBAL VARIABLES WHERE value = '3306'");
+    mysql_and_generic().verified_stmt("SHOW SESSION VARIABLES");
+    mysql_and_generic().verified_stmt("SHOW SESSION VARIABLES LIKE 'admin%'");
+    mysql_and_generic().verified_stmt("SHOW GLOBAL VARIABLES WHERE value = '3306'");
+}
+
+#[test]
+fn parse_rlike_and_regexp() {
+    for s in &[
+        "SELECT 1 WHERE 'a' RLIKE '^a$'",
+        "SELECT 1 WHERE 'a' REGEXP '^a$'",
+        "SELECT 1 WHERE 'a' NOT RLIKE '^a$'",
+        "SELECT 1 WHERE 'a' NOT REGEXP '^a$'",
+    ] {
+        mysql_and_generic().verified_only_select(s);
+    }
 }
 
 #[test]
@@ -1362,6 +2041,8 @@ fn parse_table_colum_option_on_update() {
                         option: ColumnOption::OnUpdate(Expr::Function(Function {
                             name: ObjectName(vec![Ident::new("CURRENT_TIMESTAMP")]),
                             args: vec![],
+                            null_treatment: None,
+                            filter: None,
                             over: None,
                             distinct: false,
                             special: false,
@@ -1567,20 +2248,23 @@ fn parse_hex_string_introducer() {
                 from: vec![],
                 lateral_views: vec![],
                 selection: None,
-                group_by: vec![],
+                group_by: GroupByExpr::Expressions(vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
                 qualify: None,
+                value_table_mode: None,
                 into: None
             }))),
             order_by: vec![],
             limit: None,
+            limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
+            for_clause: None,
         }))
     )
 }
@@ -1596,4 +2280,135 @@ fn parse_string_introducers() {
 #[test]
 fn parse_div_infix() {
     mysql().verified_stmt(r#"SELECT 5 DIV 2"#);
+}
+
+#[test]
+fn parse_drop_temporary_table() {
+    let sql = "DROP TEMPORARY TABLE foo";
+    match mysql().verified_stmt(sql) {
+        Statement::Drop {
+            object_type,
+            if_exists,
+            names,
+            cascade,
+            purge: _,
+            temporary,
+            ..
+        } => {
+            assert!(!if_exists);
+            assert_eq!(ObjectType::Table, object_type);
+            assert_eq!(
+                vec!["foo"],
+                names.iter().map(ToString::to_string).collect::<Vec<_>>()
+            );
+            assert!(!cascade);
+            assert!(temporary);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_convert_using() {
+    // https://dev.mysql.com/doc/refman/8.0/en/cast-functions.html#function_convert
+
+    // CONVERT(expr USING transcoding_name)
+    mysql().verified_only_select("SELECT CONVERT('x' USING latin1)");
+    mysql().verified_only_select("SELECT CONVERT(my_column USING utf8mb4) FROM my_table");
+
+    // CONVERT(expr, type)
+    mysql().verified_only_select("SELECT CONVERT('abc', CHAR(60))");
+    mysql().verified_only_select("SELECT CONVERT(123.456, DECIMAL(5,2))");
+    // with a type + a charset
+    mysql().verified_only_select("SELECT CONVERT('test', CHAR CHARACTER SET utf8mb4)");
+}
+
+#[test]
+fn parse_create_table_with_column_collate() {
+    let sql = "CREATE TABLE tb (id TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci)";
+    let canonical = "CREATE TABLE tb (id TEXT COLLATE utf8mb4_0900_ai_ci CHARACTER SET utf8mb4)";
+    match mysql().one_statement_parses_to(sql, canonical) {
+        Statement::CreateTable { name, columns, .. } => {
+            assert_eq!(name.to_string(), "tb");
+            assert_eq!(
+                vec![ColumnDef {
+                    name: Ident::new("id"),
+                    data_type: DataType::Text,
+                    collation: Some(ObjectName(vec![Ident::new("utf8mb4_0900_ai_ci")])),
+                    options: vec![ColumnOptionDef {
+                        name: None,
+                        option: ColumnOption::CharacterSet(ObjectName(vec![Ident::new("utf8mb4")]))
+                    }],
+                },],
+                columns
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_lock_tables() {
+    mysql().one_statement_parses_to(
+        "LOCK TABLES trans t READ, customer WRITE",
+        "LOCK TABLES trans AS t READ, customer WRITE",
+    );
+    mysql().verified_stmt("LOCK TABLES trans AS t READ, customer WRITE");
+    mysql().verified_stmt("LOCK TABLES trans AS t READ LOCAL, customer WRITE");
+    mysql().verified_stmt("LOCK TABLES trans AS t READ, customer LOW_PRIORITY WRITE");
+    mysql().verified_stmt("UNLOCK TABLES");
+}
+
+#[test]
+fn parse_json_table() {
+    mysql().verified_only_select("SELECT * FROM JSON_TABLE('[[1, 2], [3, 4]]', '$[*]' COLUMNS(a INT PATH '$[0]', b INT PATH '$[1]')) AS t");
+    mysql().verified_only_select(
+        r#"SELECT * FROM JSON_TABLE('["x", "y"]', '$[*]' COLUMNS(a VARCHAR(20) PATH '$')) AS t"#,
+    );
+    // with a bound parameter
+    mysql().verified_only_select(
+        r#"SELECT * FROM JSON_TABLE(?, '$[*]' COLUMNS(a VARCHAR(20) PATH '$')) AS t"#,
+    );
+    // quote escaping
+    mysql().verified_only_select(r#"SELECT * FROM JSON_TABLE('{"''": [1,2,3]}', '$."''"[*]' COLUMNS(a VARCHAR(20) PATH '$')) AS t"#);
+    // double quotes
+    mysql().verified_only_select(
+        r#"SELECT * FROM JSON_TABLE("[]", "$[*]" COLUMNS(a VARCHAR(20) PATH "$")) AS t"#,
+    );
+    // exists
+    mysql().verified_only_select(r#"SELECT * FROM JSON_TABLE('[{}, {"x":1}]', '$[*]' COLUMNS(x INT EXISTS PATH '$.x')) AS t"#);
+    // error handling
+    mysql().verified_only_select(
+        r#"SELECT * FROM JSON_TABLE('[1,2]', '$[*]' COLUMNS(x INT PATH '$' ERROR ON ERROR)) AS t"#,
+    );
+    mysql().verified_only_select(
+        r#"SELECT * FROM JSON_TABLE('[1,2]', '$[*]' COLUMNS(x INT PATH '$' ERROR ON EMPTY)) AS t"#,
+    );
+    mysql().verified_only_select(r#"SELECT * FROM JSON_TABLE('[1,2]', '$[*]' COLUMNS(x INT PATH '$' ERROR ON EMPTY DEFAULT '0' ON ERROR)) AS t"#);
+    assert_eq!(
+        mysql()
+            .verified_only_select(
+                r#"SELECT * FROM JSON_TABLE('[1,2]', '$[*]' COLUMNS(x INT PATH '$' DEFAULT '0' ON EMPTY NULL ON ERROR)) AS t"#
+            )
+            .from[0]
+            .relation,
+        TableFactor::JsonTable {
+            json_expr: Expr::Value(Value::SingleQuotedString("[1,2]".to_string())),
+            json_path: Value::SingleQuotedString("$[*]".to_string()),
+            columns: vec![
+                JsonTableColumn {
+                    name: Ident::new("x"),
+                    r#type: DataType::Int(None),
+                    path: Value::SingleQuotedString("$".to_string()),
+                    exists: false,
+                    on_empty: Some(JsonTableColumnErrorHandling::Default(Value::SingleQuotedString("0".to_string()))),
+                    on_error: Some(JsonTableColumnErrorHandling::Null),
+                },
+            ],
+            alias: Some(TableAlias {
+                name: Ident::new("t"),
+                columns: vec![],
+            }),
+        }
+    );
 }

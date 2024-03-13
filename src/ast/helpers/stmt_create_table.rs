@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{
-    ColumnDef, FileFormat, HiveDistributionStyle, HiveFormat, Ident, ObjectName, OnCommit, Query,
-    SqlOption, Statement, TableConstraint,
+    ColumnDef, Expr, FileFormat, HiveDistributionStyle, HiveFormat, Ident, ObjectName, OnCommit,
+    Query, SqlOption, Statement, TableConstraint,
 };
 use crate::parser::ParserError;
 
@@ -65,11 +65,16 @@ pub struct CreateTableBuilder {
     pub like: Option<ObjectName>,
     pub clone: Option<ObjectName>,
     pub engine: Option<String>,
+    pub comment: Option<String>,
+    pub auto_increment_offset: Option<u32>,
     pub default_charset: Option<String>,
     pub collation: Option<String>,
     pub on_commit: Option<OnCommit>,
     pub on_cluster: Option<String>,
     pub order_by: Option<Vec<Ident>>,
+    pub partition_by: Option<Box<Expr>>,
+    pub cluster_by: Option<Vec<Ident>>,
+    pub options: Option<Vec<SqlOption>>,
     pub strict: bool,
 }
 
@@ -96,11 +101,16 @@ impl CreateTableBuilder {
             like: None,
             clone: None,
             engine: None,
+            comment: None,
+            auto_increment_offset: None,
             default_charset: None,
             collation: None,
             on_commit: None,
             on_cluster: None,
             order_by: None,
+            partition_by: None,
+            cluster_by: None,
+            options: None,
             strict: false,
         }
     }
@@ -197,6 +207,16 @@ impl CreateTableBuilder {
         self
     }
 
+    pub fn comment(mut self, comment: Option<String>) -> Self {
+        self.comment = comment;
+        self
+    }
+
+    pub fn auto_increment_offset(mut self, offset: Option<u32>) -> Self {
+        self.auto_increment_offset = offset;
+        self
+    }
+
     pub fn default_charset(mut self, default_charset: Option<String>) -> Self {
         self.default_charset = default_charset;
         self
@@ -219,6 +239,21 @@ impl CreateTableBuilder {
 
     pub fn order_by(mut self, order_by: Option<Vec<Ident>>) -> Self {
         self.order_by = order_by;
+        self
+    }
+
+    pub fn partition_by(mut self, partition_by: Option<Box<Expr>>) -> Self {
+        self.partition_by = partition_by;
+        self
+    }
+
+    pub fn cluster_by(mut self, cluster_by: Option<Vec<Ident>>) -> Self {
+        self.cluster_by = cluster_by;
+        self
+    }
+
+    pub fn options(mut self, options: Option<Vec<SqlOption>>) -> Self {
+        self.options = options;
         self
     }
 
@@ -249,11 +284,16 @@ impl CreateTableBuilder {
             like: self.like,
             clone: self.clone,
             engine: self.engine,
+            comment: self.comment,
+            auto_increment_offset: self.auto_increment_offset,
             default_charset: self.default_charset,
             collation: self.collation,
             on_commit: self.on_commit,
             on_cluster: self.on_cluster,
             order_by: self.order_by,
+            partition_by: self.partition_by,
+            cluster_by: self.cluster_by,
+            options: self.options,
             strict: self.strict,
         }
     }
@@ -287,11 +327,16 @@ impl TryFrom<Statement> for CreateTableBuilder {
                 like,
                 clone,
                 engine,
+                comment,
+                auto_increment_offset,
                 default_charset,
                 collation,
                 on_commit,
                 on_cluster,
                 order_by,
+                partition_by,
+                cluster_by,
+                options,
                 strict,
             } => Ok(Self {
                 or_replace,
@@ -314,11 +359,16 @@ impl TryFrom<Statement> for CreateTableBuilder {
                 like,
                 clone,
                 engine,
+                comment,
+                auto_increment_offset,
                 default_charset,
                 collation,
                 on_commit,
                 on_cluster,
                 order_by,
+                partition_by,
+                cluster_by,
+                options,
                 strict,
             }),
             _ => Err(ParserError::ParserError(format!(
@@ -326,6 +376,14 @@ impl TryFrom<Statement> for CreateTableBuilder {
             ))),
         }
     }
+}
+
+/// Helper return type when parsing configuration for a BigQuery `CREATE TABLE` statement.
+#[derive(Default)]
+pub(crate) struct BigQueryTableConfiguration {
+    pub partition_by: Option<Box<Expr>>,
+    pub cluster_by: Option<Vec<Ident>>,
+    pub options: Option<Vec<SqlOption>>,
 }
 
 #[cfg(test)]

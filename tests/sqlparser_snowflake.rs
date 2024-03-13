@@ -26,6 +26,9 @@ use test_utils::*;
 #[macro_use]
 mod test_utils;
 
+#[cfg(test)]
+use pretty_assertions::assert_eq;
+
 #[test]
 fn test_snowflake_create_table() {
     let sql = "CREATE TABLE _my_$table (am00unt number)";
@@ -166,10 +169,17 @@ fn parse_array() {
     assert_eq!(
         &Expr::Cast {
             expr: Box::new(Expr::Identifier(Ident::new("a"))),
-            data_type: DataType::Array(None),
+            data_type: DataType::Array(ArrayElemTypeDef::None),
+            format: None,
         },
         expr_from_projection(only(&select.projection))
     );
+}
+
+#[test]
+fn parse_lateral_flatten() {
+    snowflake().verified_only_select(r#"SELECT * FROM TABLE(FLATTEN(input => parse_json('{"a":1, "b":[77,88]}'), outer => true)) AS f"#);
+    snowflake().verified_only_select(r#"SELECT emp.employee_ID, emp.last_name, index, value AS project_name FROM employees AS emp, LATERAL FLATTEN(INPUT => emp.project_names) AS proj_names"#);
 }
 
 #[test]
@@ -207,7 +217,36 @@ fn parse_json_using_colon() {
         select.projection[0]
     );
 
+    let sql = "SELECT a:date FROM t";
+    let select = snowflake().verified_only_select(sql);
+    assert_eq!(
+        SelectItem::UnnamedExpr(Expr::JsonAccess {
+            left: Box::new(Expr::Identifier(Ident::new("a"))),
+            operator: JsonOperator::Colon,
+            right: Box::new(Expr::Value(Value::UnQuotedString("date".to_string()))),
+        }),
+        select.projection[0]
+    );
+
     snowflake().one_statement_parses_to("SELECT a:b::int FROM t", "SELECT CAST(a:b AS INT) FROM t");
+
+    let sql = "SELECT a:start, a:end FROM t";
+    let select = snowflake().verified_only_select(sql);
+    assert_eq!(
+        vec![
+            SelectItem::UnnamedExpr(Expr::JsonAccess {
+                left: Box::new(Expr::Identifier(Ident::new("a"))),
+                operator: JsonOperator::Colon,
+                right: Box::new(Expr::Value(Value::UnQuotedString("start".to_string()))),
+            }),
+            SelectItem::UnnamedExpr(Expr::JsonAccess {
+                left: Box::new(Expr::Identifier(Ident::new("a"))),
+                operator: JsonOperator::Colon,
+                right: Box::new(Expr::Value(Value::UnQuotedString("end".to_string()))),
+            })
+        ],
+        select.projection
+    );
 }
 
 #[test]
@@ -223,11 +262,14 @@ fn parse_delimited_identifiers() {
             alias,
             args,
             with_hints,
+            version,
+            partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
             assert_eq!(Ident::with_quote('"', "alias"), alias.unwrap().name);
             assert!(args.is_none());
             assert!(with_hints.is_empty());
+            assert!(version.is_none());
         }
         _ => panic!("Expecting TableFactor::Table"),
     }
@@ -244,6 +286,8 @@ fn parse_delimited_identifiers() {
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
             args: vec![],
+            filter: None,
+            null_treatment: None,
             over: None,
             distinct: false,
             special: false,
@@ -500,12 +544,8 @@ fn test_select_wildcard_with_exclude_and_rename() {
 #[test]
 fn test_alter_table_swap_with() {
     let sql = "ALTER TABLE tab1 SWAP WITH tab2";
-    match snowflake_and_generic().verified_stmt(sql) {
-        Statement::AlterTable {
-            name,
-            operation: AlterTableOperation::SwapWith { table_name },
-        } => {
-            assert_eq!("tab1", name.to_string());
+    match alter_table_op_with_name(snowflake_and_generic().verified_stmt(sql), "tab1") {
+        AlterTableOperation::SwapWith { table_name } => {
             assert_eq!("tab2", table_name.to_string());
         }
         _ => unreachable!(),
@@ -537,6 +577,262 @@ fn test_drop_stage() {
 
     snowflake_and_generic()
         .one_statement_parses_to("DROP STAGE IF EXISTS s1", "DROP STAGE IF EXISTS s1");
+}
+
+#[test]
+fn parse_snowflake_declare_cursor() {
+    for (sql, expected_name, expected_assigned_expr, expected_query_projections) in [
+        (
+            "DECLARE c1 CURSOR FOR SELECT id, price FROM invoices",
+            "c1",
+            None,
+            Some(vec!["id", "price"]),
+        ),
+        (
+            "DECLARE c1 CURSOR FOR res",
+            "c1",
+            Some(DeclareAssignment::For(
+                Expr::Identifier(Ident::new("res")).into(),
+            )),
+            None,
+        ),
+    ] {
+        match snowflake().verified_stmt(sql) {
+            Statement::Declare { mut stmts } => {
+                assert_eq!(1, stmts.len());
+                let Declare {
+                    names,
+                    data_type,
+                    declare_type,
+                    assignment: assigned_expr,
+                    for_query,
+                    ..
+                } = stmts.swap_remove(0);
+                assert_eq!(vec![Ident::new(expected_name)], names);
+                assert!(data_type.is_none());
+                assert_eq!(Some(DeclareType::Cursor), declare_type);
+                assert_eq!(expected_assigned_expr, assigned_expr);
+                assert_eq!(
+                    expected_query_projections,
+                    for_query.as_ref().map(|q| {
+                        match q.body.as_ref() {
+                            SetExpr::Select(q) => q
+                                .projection
+                                .iter()
+                                .map(|item| match item {
+                                    SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                                        ident.value.as_str()
+                                    }
+                                    _ => unreachable!(),
+                                })
+                                .collect::<Vec<_>>(),
+                            _ => unreachable!(),
+                        }
+                    })
+                )
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let error_sql = "DECLARE c1 CURSOR SELECT id FROM invoices";
+    assert_eq!(
+        ParserError::ParserError("Expected FOR, found: SELECT".to_owned()),
+        snowflake().parse_sql_statements(error_sql).unwrap_err()
+    );
+
+    let error_sql = "DECLARE c1 CURSOR res";
+    assert_eq!(
+        ParserError::ParserError("Expected FOR, found: res".to_owned()),
+        snowflake().parse_sql_statements(error_sql).unwrap_err()
+    );
+}
+
+#[test]
+fn parse_snowflake_declare_result_set() {
+    for (sql, expected_name, expected_assigned_expr) in [
+        (
+            "DECLARE res RESULTSET DEFAULT 42",
+            "res",
+            Some(DeclareAssignment::Default(Expr::Value(number("42")).into())),
+        ),
+        (
+            "DECLARE res RESULTSET := 42",
+            "res",
+            Some(DeclareAssignment::DuckAssignment(
+                Expr::Value(number("42")).into(),
+            )),
+        ),
+        ("DECLARE res RESULTSET", "res", None),
+    ] {
+        match snowflake().verified_stmt(sql) {
+            Statement::Declare { mut stmts } => {
+                assert_eq!(1, stmts.len());
+                let Declare {
+                    names,
+                    data_type,
+                    declare_type,
+                    assignment: assigned_expr,
+                    for_query,
+                    ..
+                } = stmts.swap_remove(0);
+                assert_eq!(vec![Ident::new(expected_name)], names);
+                assert!(data_type.is_none());
+                assert!(for_query.is_none());
+                assert_eq!(Some(DeclareType::ResultSet), declare_type);
+                assert_eq!(expected_assigned_expr, assigned_expr);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let sql = "DECLARE res RESULTSET DEFAULT (SELECT price FROM invoices)";
+    assert_eq!(snowflake().verified_stmt(sql).to_string(), sql);
+
+    let error_sql = "DECLARE res RESULTSET DEFAULT";
+    assert_eq!(
+        ParserError::ParserError("Expected an expression:, found: EOF".to_owned()),
+        snowflake().parse_sql_statements(error_sql).unwrap_err()
+    );
+
+    let error_sql = "DECLARE res RESULTSET :=";
+    assert_eq!(
+        ParserError::ParserError("Expected an expression:, found: EOF".to_owned()),
+        snowflake().parse_sql_statements(error_sql).unwrap_err()
+    );
+}
+
+#[test]
+fn parse_snowflake_declare_exception() {
+    for (sql, expected_name, expected_assigned_expr) in [
+        (
+            "DECLARE ex EXCEPTION (42, 'ERROR')",
+            "ex",
+            Some(DeclareAssignment::Expr(
+                Expr::Tuple(vec![
+                    Expr::Value(number("42")),
+                    Expr::Value(Value::SingleQuotedString("ERROR".to_string())),
+                ])
+                .into(),
+            )),
+        ),
+        ("DECLARE ex EXCEPTION", "ex", None),
+    ] {
+        match snowflake().verified_stmt(sql) {
+            Statement::Declare { mut stmts } => {
+                assert_eq!(1, stmts.len());
+                let Declare {
+                    names,
+                    data_type,
+                    declare_type,
+                    assignment: assigned_expr,
+                    for_query,
+                    ..
+                } = stmts.swap_remove(0);
+                assert_eq!(vec![Ident::new(expected_name)], names);
+                assert!(data_type.is_none());
+                assert!(for_query.is_none());
+                assert_eq!(Some(DeclareType::Exception), declare_type);
+                assert_eq!(expected_assigned_expr, assigned_expr);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn parse_snowflake_declare_variable() {
+    for (sql, expected_name, expected_data_type, expected_assigned_expr) in [
+        (
+            "DECLARE profit TEXT DEFAULT 42",
+            "profit",
+            Some(DataType::Text),
+            Some(DeclareAssignment::Default(Expr::Value(number("42")).into())),
+        ),
+        (
+            "DECLARE profit DEFAULT 42",
+            "profit",
+            None,
+            Some(DeclareAssignment::Default(Expr::Value(number("42")).into())),
+        ),
+        ("DECLARE profit TEXT", "profit", Some(DataType::Text), None),
+        ("DECLARE profit", "profit", None, None),
+    ] {
+        match snowflake().verified_stmt(sql) {
+            Statement::Declare { mut stmts } => {
+                assert_eq!(1, stmts.len());
+                let Declare {
+                    names,
+                    data_type,
+                    declare_type,
+                    assignment: assigned_expr,
+                    for_query,
+                    ..
+                } = stmts.swap_remove(0);
+                assert_eq!(vec![Ident::new(expected_name)], names);
+                assert!(for_query.is_none());
+                assert_eq!(expected_data_type, data_type);
+                assert_eq!(None, declare_type);
+                assert_eq!(expected_assigned_expr, assigned_expr);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    snowflake().one_statement_parses_to("DECLARE profit;", "DECLARE profit");
+
+    let error_sql = "DECLARE profit INT 2";
+    assert_eq!(
+        ParserError::ParserError("Expected end of statement, found: 2".to_owned()),
+        snowflake().parse_sql_statements(error_sql).unwrap_err()
+    );
+
+    let error_sql = "DECLARE profit INT DEFAULT";
+    assert_eq!(
+        ParserError::ParserError("Expected an expression:, found: EOF".to_owned()),
+        snowflake().parse_sql_statements(error_sql).unwrap_err()
+    );
+
+    let error_sql = "DECLARE profit DEFAULT";
+    assert_eq!(
+        ParserError::ParserError("Expected an expression:, found: EOF".to_owned()),
+        snowflake().parse_sql_statements(error_sql).unwrap_err()
+    );
+}
+
+#[test]
+fn parse_snowflake_declare_multi_statements() {
+    let sql = concat!(
+        "DECLARE profit DEFAULT 42; ",
+        "res RESULTSET DEFAULT (SELECT price FROM invoices); ",
+        "c1 CURSOR FOR res; ",
+        "ex EXCEPTION (-20003, 'ERROR: Could not create table.')"
+    );
+    match snowflake().verified_stmt(sql) {
+        Statement::Declare { stmts } => {
+            let actual = stmts
+                .iter()
+                .map(|stmt| (stmt.names[0].value.as_str(), stmt.declare_type.clone()))
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                vec![
+                    ("profit", None),
+                    ("res", Some(DeclareType::ResultSet)),
+                    ("c1", Some(DeclareType::Cursor)),
+                    ("ex", Some(DeclareType::Exception)),
+                ],
+                actual
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let error_sql = "DECLARE profit DEFAULT 42 c1 CURSOR FOR res;";
+    assert_eq!(
+        ParserError::ParserError("Expected end of statement, found: c1".to_owned()),
+        snowflake().parse_sql_statements(error_sql).unwrap_err()
+    );
 }
 
 #[test]
@@ -1002,14 +1298,14 @@ fn test_copy_into_copy_options() {
 
 #[test]
 fn test_snowflake_stage_object_names() {
-    let allowed_formatted_names = vec![
+    let allowed_formatted_names = [
         "my_company.emp_basic",
         "@namespace.%table_name",
         "@namespace.%table_name/path",
         "@namespace.stage_name/path",
         "@~/path",
     ];
-    let mut allowed_object_names = vec![
+    let mut allowed_object_names = [
         ObjectName(vec![Ident::new("my_company"), Ident::new("emp_basic")]),
         ObjectName(vec![Ident::new("@namespace"), Ident::new("%table_name")]),
         ObjectName(vec![
@@ -1039,4 +1335,162 @@ fn test_snowflake_stage_object_names() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn test_snowflake_trim() {
+    let real_sql = r#"SELECT customer_id, TRIM(sub_items.value:item_price_id, '"', "a") AS item_price_id FROM models_staging.subscriptions"#;
+    assert_eq!(snowflake().verified_stmt(real_sql).to_string(), real_sql);
+
+    let sql_only_select = "SELECT TRIM('xyz', 'a')";
+    let select = snowflake().verified_only_select(sql_only_select);
+    assert_eq!(
+        &Expr::Trim {
+            expr: Box::new(Expr::Value(Value::SingleQuotedString("xyz".to_owned()))),
+            trim_where: None,
+            trim_what: None,
+            trim_characters: Some(vec![Expr::Value(Value::SingleQuotedString("a".to_owned()))]),
+        },
+        expr_from_projection(only(&select.projection))
+    );
+
+    // missing comma separation
+    let error_sql = "SELECT TRIM('xyz' 'a')";
+    assert_eq!(
+        ParserError::ParserError("Expected ), found: 'a'".to_owned()),
+        snowflake().parse_sql_statements(error_sql).unwrap_err()
+    );
+}
+
+#[test]
+fn test_number_placeholder() {
+    let sql_only_select = "SELECT :1";
+    let select = snowflake().verified_only_select(sql_only_select);
+    assert_eq!(
+        &Expr::Value(Value::Placeholder(":1".into())),
+        expr_from_projection(only(&select.projection))
+    );
+
+    snowflake()
+        .parse_sql_statements("alter role 1 with name = 'foo'")
+        .expect_err("should have failed");
+}
+
+#[test]
+fn parse_position_not_function_columns() {
+    snowflake_and_generic()
+        .verified_stmt("SELECT position FROM tbl1 WHERE position NOT IN ('first', 'last')");
+}
+
+#[test]
+fn parse_subquery_function_argument() {
+    // Snowflake allows passing an unparenthesized subquery as the single
+    // argument to a function.
+    snowflake().one_statement_parses_to(
+        "SELECT parse_json(SELECT '{}')",
+        "SELECT parse_json((SELECT '{}'))",
+    );
+
+    // Subqueries that begin with WITH work too.
+    snowflake().one_statement_parses_to(
+        "SELECT parse_json(WITH q AS (SELECT '{}' AS foo) SELECT foo FROM q)",
+        "SELECT parse_json((WITH q AS (SELECT '{}' AS foo) SELECT foo FROM q))",
+    );
+
+    // Commas are parsed as part of the subquery, not additional arguments to
+    // the function.
+    snowflake().one_statement_parses_to("SELECT func(SELECT 1, 2)", "SELECT func((SELECT 1, 2))");
+}
+
+#[test]
+fn parse_division_correctly() {
+    snowflake_and_generic().one_statement_parses_to(
+        "SELECT field/1000 FROM tbl1",
+        "SELECT field / 1000 FROM tbl1",
+    );
+
+    snowflake_and_generic().one_statement_parses_to(
+        "SELECT tbl1.field/tbl2.field FROM tbl1 JOIN tbl2 ON tbl1.id = tbl2.entity_id",
+        "SELECT tbl1.field / tbl2.field FROM tbl1 JOIN tbl2 ON tbl1.id = tbl2.entity_id",
+    );
+}
+
+#[test]
+fn parse_pivot_of_table_factor_derived() {
+    snowflake().verified_stmt(
+        "SELECT * FROM (SELECT place_id, weekday, open FROM times AS p) PIVOT(max(open) FOR weekday IN (0, 1, 2, 3, 4, 5, 6)) AS p (place_id, open_sun, open_mon, open_tue, open_wed, open_thu, open_fri, open_sat)"
+    );
+}
+
+#[test]
+fn parse_top() {
+    snowflake().one_statement_parses_to(
+        "SELECT TOP 4 c1 FROM testtable",
+        "SELECT TOP 4 c1 FROM testtable",
+    );
+}
+
+#[test]
+fn parse_comma_outer_join() {
+    // compound identifiers
+    let case1 =
+        snowflake().verified_only_select("SELECT t1.c1, t2.c2 FROM t1, t2 WHERE t1.c1 = t2.c2 (+)");
+    assert_eq!(
+        case1.selection,
+        Some(Expr::BinaryOp {
+            left: Box::new(Expr::CompoundIdentifier(vec![
+                Ident::new("t1"),
+                Ident::new("c1")
+            ])),
+            op: BinaryOperator::Eq,
+            right: Box::new(Expr::OuterJoin(Box::new(Expr::CompoundIdentifier(vec![
+                Ident::new("t2"),
+                Ident::new("c2")
+            ]))))
+        })
+    );
+
+    // regular identifiers
+    let case2 =
+        snowflake().verified_only_select("SELECT t1.c1, t2.c2 FROM t1, t2 WHERE c1 = c2 (+)");
+    assert_eq!(
+        case2.selection,
+        Some(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("c1"))),
+            op: BinaryOperator::Eq,
+            right: Box::new(Expr::OuterJoin(Box::new(Expr::Identifier(Ident::new(
+                "c2"
+            )))))
+        })
+    );
+
+    // ensure we can still parse function calls with a unary plus arg
+    let case3 =
+        snowflake().verified_only_select("SELECT t1.c1, t2.c2 FROM t1, t2 WHERE c1 = myudf(+42)");
+    assert_eq!(
+        case3.selection,
+        Some(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("c1"))),
+            op: BinaryOperator::Eq,
+            right: Box::new(Expr::Function(Function {
+                name: ObjectName(vec![Ident::new("myudf")]),
+                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::UnaryOp {
+                    op: UnaryOperator::Plus,
+                    expr: Box::new(Expr::Value(number("42")))
+                }))],
+                filter: None,
+                null_treatment: None,
+                over: None,
+                distinct: false,
+                special: false,
+                order_by: vec![]
+            }))
+        })
+    );
+
+    // permissive with whitespace
+    snowflake().verified_only_select_with_canonical(
+        "SELECT t1.c1, t2.c2 FROM t1, t2 WHERE t1.c1 = t2.c2(   +     )",
+        "SELECT t1.c1, t2.c2 FROM t1, t2 WHERE t1.c1 = t2.c2 (+)",
+    );
 }

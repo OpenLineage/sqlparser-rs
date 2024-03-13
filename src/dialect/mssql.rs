@@ -12,7 +12,7 @@
 
 use crate::dialect::Dialect;
 
-// [Microsoft SQL Server](https://www.microsoft.com/en-us/sql-server/) dialect
+/// A [`Dialect`] for [Microsoft SQL Server](https://www.microsoft.com/en-us/sql-server/)
 #[derive(Debug)]
 pub struct MsSqlDialect {}
 
@@ -33,5 +33,11 @@ impl Dialect for MsSqlDialect {
             || ch == '$'
             || ch == '#'
             || ch == '_'
+    }
+
+    /// SQL Server has `CONVERT(type, value)` instead of `CONVERT(value, type)`
+    /// <https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql?view=sql-server-ver16>
+    fn convert_type_before_value(&self) -> bool {
+        true
     }
 }

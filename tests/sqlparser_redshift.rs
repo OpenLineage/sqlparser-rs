@@ -16,6 +16,7 @@ mod test_utils;
 use test_utils::*;
 
 use sqlparser::ast::*;
+use sqlparser::dialect::GenericDialect;
 use sqlparser::dialect::RedshiftSqlDialect;
 
 #[test]
@@ -45,6 +46,8 @@ fn test_square_brackets_over_db_schema_table_name() {
                 alias: None,
                 args: None,
                 with_hints: vec![],
+                version: None,
+                partitions: vec![],
             },
             joins: vec![],
         }
@@ -89,6 +92,8 @@ fn test_double_quotes_over_db_schema_table_name() {
                 alias: None,
                 args: None,
                 with_hints: vec![],
+                version: None,
+                partitions: vec![],
             },
             joins: vec![],
         }
@@ -108,11 +113,14 @@ fn parse_delimited_identifiers() {
             alias,
             args,
             with_hints,
+            version,
+            partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
             assert_eq!(Ident::with_quote('"', "alias"), alias.unwrap().name);
             assert!(args.is_none());
             assert!(with_hints.is_empty());
+            assert!(version.is_none());
         }
         _ => panic!("Expecting TableFactor::Table"),
     }
@@ -129,6 +137,8 @@ fn parse_delimited_identifiers() {
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
             args: vec![],
+            null_treatment: None,
+            filter: None,
             over: None,
             distinct: false,
             special: false,
@@ -265,6 +275,13 @@ fn redshift() -> TestedDialects {
     }
 }
 
+fn redshift_and_generic() -> TestedDialects {
+    TestedDialects {
+        dialects: vec![Box::new(RedshiftSqlDialect {}), Box::new(GenericDialect {})],
+        options: None,
+    }
+}
+
 #[test]
 fn test_sharp() {
     let sql = "SELECT #_of_values";
@@ -273,4 +290,10 @@ fn test_sharp() {
         SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("#_of_values"))),
         select.projection[0]
     );
+}
+
+#[test]
+fn test_create_view_with_no_schema_binding() {
+    redshift_and_generic()
+        .verified_stmt("CREATE VIEW myevent AS SELECT eventname FROM event WITH NO SCHEMA BINDING");
 }

@@ -28,7 +28,11 @@ use core::fmt::Debug;
 
 use crate::dialect::*;
 use crate::parser::{Parser, ParserError};
+use crate::tokenizer::Tokenizer;
 use crate::{ast::*, parser::ParserOptions};
+
+#[cfg(test)]
+use pretty_assertions::assert_eq;
 
 /// Tests use the methods on this struct to invoke the parser on one or
 /// multiple dialects.
@@ -82,8 +86,13 @@ impl TestedDialects {
     /// the result is the same for all tested dialects.
     pub fn parse_sql_statements(&self, sql: &str) -> Result<Vec<Statement>, ParserError> {
         self.one_of_identical_results(|dialect| {
+            let mut tokenizer = Tokenizer::new(dialect, sql);
+            if let Some(options) = &self.options {
+                tokenizer = tokenizer.with_unescape(options.unescape);
+            }
+            let tokens = tokenizer.tokenize()?;
             self.new_parser(dialect)
-                .try_with_sql(sql)?
+                .with_tokens(tokens)
                 .parse_statements()
         })
         // To fail the `ensure_multiple_dialects_are_tested` test:
@@ -92,6 +101,11 @@ impl TestedDialects {
 
     /// Ensures that `sql` parses as a single [Statement] for all tested
     /// dialects.
+    ///
+    /// In general, the canonical SQL should be the same (see crate
+    /// documentation for rationale) and you should prefer the `verified_`
+    /// variants in testing, such as  [`verified_statement`] or
+    /// [`verified_query`].
     ///
     /// If `canonical` is non empty,this function additionally asserts
     /// that:
@@ -102,7 +116,7 @@ impl TestedDialects {
     /// 2. re-serializing the result of parsing `sql` produces the same
     /// `canonical` sql string
     pub fn one_statement_parses_to(&self, sql: &str, canonical: &str) -> Statement {
-        let mut statements = self.parse_sql_statements(sql).unwrap();
+        let mut statements = self.parse_sql_statements(sql).expect(sql);
         assert_eq!(statements.len(), 1);
 
         if !canonical.is_empty() && sql != canonical {
@@ -153,6 +167,24 @@ impl TestedDialects {
         }
     }
 
+    /// Ensures that `sql` parses as a single [`Select`], and that additionally:
+    ///
+    /// 1. parsing `sql` results in the same [`Statement`] as parsing
+    /// `canonical`.
+    ///
+    /// 2. re-serializing the result of parsing `sql` produces the same
+    /// `canonical` sql string
+    pub fn verified_only_select_with_canonical(&self, query: &str, canonical: &str) -> Select {
+        let q = match self.one_statement_parses_to(query, canonical) {
+            Statement::Query(query) => *query,
+            _ => panic!("Expected Query"),
+        };
+        match *q.body {
+            SetExpr::Select(s) => *s,
+            _ => panic!("Expected SetExpr::Select"),
+        }
+    }
+
     /// Ensures that `sql` parses as an [`Expr`], and that
     /// re-serializing the parse result produces the same `sql`
     /// string (is not modified after a serialization round-trip).
@@ -161,21 +193,35 @@ impl TestedDialects {
     }
 }
 
+/// Returns all available dialects.
 pub fn all_dialects() -> TestedDialects {
+    all_dialects_except(|_| false)
+}
+
+/// Returns available dialects. The `except` predicate is used
+/// to filter out specific dialects.
+pub fn all_dialects_except<F>(except: F) -> TestedDialects
+where
+    F: Fn(&dyn Dialect) -> bool,
+{
+    let all_dialects = vec![
+        Box::new(GenericDialect {}) as Box<dyn Dialect>,
+        Box::new(PostgreSqlDialect {}) as Box<dyn Dialect>,
+        Box::new(MsSqlDialect {}) as Box<dyn Dialect>,
+        Box::new(AnsiDialect {}) as Box<dyn Dialect>,
+        Box::new(SnowflakeDialect {}) as Box<dyn Dialect>,
+        Box::new(HiveDialect {}) as Box<dyn Dialect>,
+        Box::new(RedshiftSqlDialect {}) as Box<dyn Dialect>,
+        Box::new(MySqlDialect {}) as Box<dyn Dialect>,
+        Box::new(BigQueryDialect {}) as Box<dyn Dialect>,
+        Box::new(SQLiteDialect {}) as Box<dyn Dialect>,
+        Box::new(DuckDbDialect {}) as Box<dyn Dialect>,
+    ];
     TestedDialects {
-        dialects: vec![
-            Box::new(GenericDialect {}),
-            Box::new(PostgreSqlDialect {}),
-            Box::new(MsSqlDialect {}),
-            Box::new(AnsiDialect {}),
-            Box::new(SnowflakeDialect {}),
-            Box::new(HiveDialect {}),
-            Box::new(RedshiftSqlDialect {}),
-            Box::new(MySqlDialect {}),
-            Box::new(BigQueryDialect {}),
-            Box::new(SQLiteDialect {}),
-            Box::new(DuckDbDialect {}),
-        ],
+        dialects: all_dialects
+            .into_iter()
+            .filter(|d| !except(d.as_ref()))
+            .collect(),
         options: None,
     }
 }
@@ -203,6 +249,28 @@ pub fn expr_from_projection(item: &SelectItem) -> &Expr {
     }
 }
 
+pub fn alter_table_op_with_name(stmt: Statement, expected_name: &str) -> AlterTableOperation {
+    match stmt {
+        Statement::AlterTable {
+            name,
+            if_exists,
+            only: is_only,
+            operations,
+            location: _,
+        } => {
+            assert_eq!(name.to_string(), expected_name);
+            assert!(!if_exists);
+            assert!(!is_only);
+            only(operations)
+        }
+        _ => panic!("Expected ALTER TABLE statement"),
+    }
+}
+
+pub fn alter_table_op(stmt: Statement) -> AlterTableOperation {
+    alter_table_op_with_name(stmt, "tab")
+}
+
 /// Creates a `Value::Number`, panic'ing if n is not a number
 pub fn number(n: &str) -> Value {
     Value::Number(n.parse().unwrap(), false)
@@ -221,6 +289,8 @@ pub fn table(name: impl Into<String>) -> TableFactor {
         alias: None,
         args: None,
         with_hints: vec![],
+        version: None,
+        partitions: vec![],
     }
 }
 
