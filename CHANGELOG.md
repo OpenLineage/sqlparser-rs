@@ -3,10 +3,243 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Given that the parser produces a typed AST, any changes to the AST will technically be breaking and thus will result in a `0.(N+1)` version. We document changes that break via addition as "Added".
+Given that the parser produces a typed AST, any changes to the AST will
+technically be breaking and thus will result in a `0.(N+1)` version. We document
+changes that break via addition as "Added".
 
 ## [Unreleased]
 Check https://github.com/sqlparser-rs/sqlparser-rs/commits/main for undocumented changes.
+
+## [0.45.0] 2024-04-12
+
+### Added
+* Support `DateTimeField` variants: `CUSTOM` and `WEEK(MONDAY)` (#1191) - Thanks @iffyio
+* Support for arbitrary expr in `MapAccessSyntax`  (#1179) - Thanks @iffyio
+* Support unquoted hyphen in table/view declaration for BigQuery (#1178) - Thanks @iffyio
+* Support `CREATE/DROP SECRET` for duckdb dialect (#1208) - Thanks @JichaoS
+* Support MySQL `UNIQUE` table constraint (#1164) - Thanks @Nikita-str
+* Support tailing commas on Snowflake. (#1205) - Thanks @yassun7010
+* Support `[FIRST | AFTER column_name]`  in `ALTER TABLE` for MySQL (#1180)  - Thanks @xring
+* Support inline comment with hash syntax for BigQuery  (#1192) - Thanks @iffyio
+* Support named windows in OVER (window_definition) clause (#1166) - Thanks @Nikita-str
+* Support PARALLEL ... and for ..ON NULL INPUT ... to CREATE FUNCTION` (#1202) - Thanks @dimfeld
+* Support DuckDB functions named arguments with assignment operator (#1195) - Thanks @alamb
+* Support DuckDB struct literal syntax (#1194) - Thanks @gstvg
+* Support `$$` in generic dialect ... (#1185)- Thanks @milenkovicm
+* Support row_alias and col_aliases in `INSERT` statement for MySQL and Generic dialects (#1136) - Thanks @emin100
+
+### Fixed
+* Fix dollar quoted string tokenizer (#1193) - Thanks @ZacJW
+* Do not allocate in `impl Display` for `DateTimeField` (#1209) - Thanks @alamb
+* Fix parse `COPY INTO` stage names without parens for SnowFlake (#1187) - Thanks @mobuchowski
+* Solve stack overflow on RecursionLimitExceeded on debug builds (#1171) - Thanks @Nikita-str
+* Fix parsing of equality binary operator in function argument (#1182) - Thanks @jmhain
+* Fix some comments (#1184) - Thanks @sunxunle
+
+### Changed
+* Cleanup `CREATE FUNCTION` tests (#1203) - Thanks @alamb
+* Parse `SUBSTRING FROM` syntax in all dialects, reflect change in the AST (#1173) - Thanks @lovasoa
+* Add identifier quote style to Dialect trait (#1170) - Thanks @backkem
+
+## [0.44.0] 2024-03-02
+
+### Added
+* Support EXPLAIN / DESCR / DESCRIBE [FORMATTED | EXTENDED] (#1156) - Thanks @jonathanlehtoalamb
+* Support ALTER TABLE ... SET LOCATION (#1154) - Thanks @jonathanlehto
+* Support `ROW FORMAT DELIMITED` in Hive (#1155) - Thanks @jonathanlehto
+* Support `SERDEPROPERTIES` for `CREATE TABLE` with Hive (#1152) - Thanks @jonathanlehto
+* Support `EXECUTE ... USING` for Postgres (#1153) - Thanks @jonathanlehto
+* Support Postgres style `CREATE FUNCTION` in GenericDialect (#1159) - Thanks @alamb
+* Support `SET TBLPROPERTIES`  (#1151) - Thanks @jonathanlehto
+* Support `UNLOAD` statement (#1150) - Thanks @jonathanlehto
+* Support `MATERIALIZED CTEs` (#1148) - Thanks @ReppCodes
+* Support `DECLARE` syntax for snowflake and bigquery (#1122) - Thanks @iffyio
+* Support `SELECT AS VALUE` and `SELECT AS STRUCT` for BigQuery (#1135) - Thanks @lustefaniak
+* Support `(+)` outer join syntax (#1145) - Thanks @jmhain
+* Support `INSERT INTO ... SELECT ... RETURNING`(#1132) - Thanks @lovasoa
+* Support DuckDB `INSTALL` and `LOAD` (#1127) - Thanks @universalmind303
+* Support `=` operator in function args (#1128) - Thanks @universalmind303
+* Support `CREATE VIEW IF NOT EXISTS` (#1118) - Thanks @7phs
+* Support `UPDATE FROM` for SQLite (further to #694) (#1117) - Thanks @ggaughan
+* Support optional `DELETE FROM` statement (#1120) - Thanks @iffyio
+* Support MySQL `SHOW STATUS` statement (#1119) - Thanks invm
+
+### Fixed
+* Clean up nightly clippy lints (#1158) - Thanks @alamb
+* Handle escape, unicode, and hex in tokenize_escaped_single_quoted_string (#1146) - Thanks @JasonLi-cn
+* Fix panic while parsing `REPLACE` (#1140) - THanks @jjbayer
+* Fix clippy warning from rust 1.76 (#1130) - Thanks @alamb
+* Fix release instructions (#1115) - Thanks @alamb
+
+### Changed
+* Add `parse_keyword_with_tokens` for paring keyword and tokens combination (#1141) - Thanks @viirya
+* Add ParadeDB to list of known users (#1142) - Thanks @philippemnoel
+* Accept JSON_TABLE both as an unquoted table name and a table-valued function (#1134) - Thanks @lovasoa
+
+
+## [0.43.1] 2024-01-22
+### Changes
+* Fixed CHANGELOG
+
+
+## [0.43.0] 2024-01-22
+* NO CHANGES
+
+## [0.42.0] 2024-01-22
+
+### Added
+* Support for constraint `CHARACTERISTICS` clause (#1099) - Thanks @dimfeld
+* Support for unquoted hyphenated identifiers on bigquery (#1109) - Thanks @jmhain
+* Support `BigQuery` table and view options (#1061) - Thanks @iffyio
+* Support Postgres operators for the LIKE expression variants (#1096) - Thanks @gruuya
+* Support "timezone_region" and "timezone_abbr" for `EXTRACT` (and `DATE_PART`) (#1090) - Thanks @alexander-beedie
+* Support `JSONB` datatype (#1089) - Thanks @alexander-beedie
+* Support PostgreSQL `^@` starts-with operator (#1091) - Thanks @alexander-beedie
+* Support PostgreSQL Insert table aliases (#1069) (#1084) - Thanks @boydjohnson
+* Support PostgreSQL `CREATE EXTENSION` (#1078) - Thanks @tobyhede
+* Support PostgreSQL `ADD GENERATED` in `ALTER COLUMN` statements (#1079) - Thanks @tobyhede
+* Support SQLite column definitions with no type (#1075) - Thanks @takluyver
+* Support PostgreSQL `ENABLE` and `DISABLE` on `ALTER TABLE` (#1077) - Thanks @tobyhede
+* Support MySQL `FLUSH` statement (#1076) - Thanks @emin100
+* Support Mysql `REPLACE` statement and `PRIORITY` clause of `INSERT` (#1072) - Thanks @emin100
+
+### Fixed
+* Fix `:start` and `:end` json accesses on SnowFlake (#1110) - Thanks @jmhain
+* Fix array_agg wildcard behavior (#1093) - Thanks @ReppCodes
+* Error on dangling `NO` in `CREATE SEQUENCE` options (#1104) - Thanks @PartiallyTyped
+* Allow string values in `PRAGMA` commands (#1101) - Thanks @invm
+
+### Changed
+* Use `Option<Expr>` for Min and Max vals in Seq Opts, fix alter col seq display (#1106) - Thanks @PartiallyTyped
+* Replace `AtomicUsize` with Cell<usize> in the recursion counter (#1098) - Thanks @wzzzzd
+* Add Qrlew as a user in README.md (#1107) - Thanks @ngrislain
+* Add APIs to reuse token buffers in `Tokenizer` (#1094) - Thanks @0rphon
+* Bump version of `sqlparser-derive` to 0.2.2 (#1083) - Thanks @alamb
+
+## [0.41.0] 2023-12-22
+
+### Added
+* Support `DEFERRED`, `IMMEDIATE`, and `EXCLUSIVE` in SQLite's `BEGIN TRANSACTION` command (#1067) - Thanks @takaebato
+* Support generated columns skipping `GENERATED ALWAYS` keywords (#1058) - Thanks @takluyver
+* Support `LOCK/UNLOCK TABLES` for MySQL (#1059) - Thanks @zzzdong
+* Support `JSON_TABLE` (#1062) - Thanks @lovasoa
+* Support `CALL` statements (#1063) - Thanks @lovasoa
+
+### Fixed
+* fix rendering of SELECT TOP (#1070) for Snowflake - Thanks jmhain
+
+### Changed
+* Improve documentation formatting (#1068) - Thanks @alamb
+* Replace type_id() by trait method to allow wrapping dialects (#1065) - Thanks @jjbayer
+* Document that comments aren't preserved for round trip (#1060) - Thanks @takluyver
+* Update sqlparser-derive to use `syn 2.0` (#1040) - Thanks @serprex
+
+## [0.40.0] 2023-11-27
+
+### Added
+* Add `{pre,post}_visit_query` to `Visitor` (#1044) - Thanks @jmhain
+* Support generated virtual columns with expression (#1051) - Thanks @takluyver
+* Support PostgreSQL `END` (#1035) - Thanks @tobyhede
+* Support `INSERT INTO ... DEFAULT VALUES ...` (#1036) - Thanks @CDThomas
+* Support `RELEASE` and `ROLLBACK TO SAVEPOINT` (#1045) - Thanks @CDThomas
+* Support `CONVERT` expressions (#1048) - Thanks @lovasoa
+* Support `GLOBAL` and `SESSION` parts in `SHOW VARIABLES` for mysql and generic - Thanks @emin100
+* Support snowflake `PIVOT` on derived table factors (#1027) - Thanks @lustefaniak
+* Support mssql json and xml extensions (#1043) - Thanks @lovasoa
+* Support for `MAX` as a character length (#1038) - Thanks @lovasoa
+* Support `IN ()` syntax of SQLite (#1028) - Thanks @alamb
+
+### Fixed
+* Fix extra whitespace printed before `ON CONFLICT` (#1037) - Thanks @CDThomas
+
+### Changed
+* Document round trip ability (#1052) - Thanks @alamb
+* Add PRQL to list of users (#1031) - Thanks @vanillajonathan
+
+## [0.39.0] 2023-10-27
+
+### Added
+* Support for `LATERAL FLATTEN` and similar (#1026) - Thanks @lustefaniak
+* Support BigQuery struct, array and bytes , int64, `float64` datatypes (#1003) - Thanks @iffyio
+* Support numbers as placeholders in Snowflake (e.g. `:1)` (#1001) - Thanks @yuval-illumex
+* Support date 'key' when using semi structured data (#1023) @yuval-illumex
+* Support IGNORE|RESPECT NULLs clause in window functions (#998) - Thanks @yuval-illumex
+* Support for single-quoted identifiers (#1021) - Thanks @lovasoa
+* Support multiple PARTITION statements in ALTER TABLE ADD statement (#1011) - Thanks @bitemyapp
+* Support "with" identifiers surrounded by backticks in GenericDialect (#1010) - Thanks @bitemyapp
+* Support INSERT IGNORE in MySql and GenericDialect (#1004) - Thanks @emin100
+* Support SQLite `pragma` statement (#969) - Thanks @marhoily
+* Support `position` as a column name (#1022) - Thanks @lustefaniak
+* Support `FILTER` in Functions (for `OVER`) clause (#1007) - Thanks @lovasoa
+* Support `SELECT * EXCEPT/REPLACE` syntax from ClickHouse (#1013) - Thanks @lustefaniak
+* Support subquery as function arg w/o parens in Snowflake dialect (#996) - Thanks @jmhain
+* Support `UNION DISTINCT BY NAME` syntax (#997) - Thanks @alexander-beedie
+* Support mysql `RLIKE` and `REGEXP` binary operators (#1017) - Thanks @lovasoa
+* Support bigquery `CAST AS x [STRING|DATE] FORMAT` syntax (#978) - Thanks @lustefaniak
+* Support Snowflake/BigQuery `TRIM`. (#975) - Thanks @zdenal
+* Support `CREATE [TEMPORARY|TEMP] VIEW [IF NOT EXISTS] `(#993) - Thanks @gabivlj
+* Support for `CREATE VIEW … WITH NO SCHEMA BINDING` Redshift (#979) - Thanks @lustefaniak
+* Support `UNPIVOT` and a fix for chained PIVOTs (#983) - @jmhain
+* Support for `LIMIT BY` (#977) - Thanks @lustefaniak
+* Support for mixed BigQuery table name quoting (#971) - Thanks @iffyio
+* Support `DELETE` with `ORDER BY` and `LIMIT` (MySQL) (#992) - Thanks @ulrichsg
+* Support `EXTRACT` for `DAYOFWEEK`, `DAYOFYEAR`, `ISOWEEK`, `TIME` (#980) - Thanks @lustefaniak
+* Support `ATTACH DATABASE` (#989) - Thanks @lovasoa
+
+### Fixed
+* Fix handling of `/~%` in Snowflake stage name (#1009) - Thanks @lustefaniak
+* Fix column `COLLATE` not displayed (#1012) - Thanks @lustefaniak
+* Fix for clippy 1.73 (#995) - Thanks @alamb
+
+### Changed
+* Test to ensure `+ - * / %` binary operators work the same in all dialects (#1025)  - Thanks @lustefaniak
+* Improve documentation on Parser::consume_token and friends (#994) - Thanks @alamb
+* Test that regexp can be used as an identifier in postgres (#1018) - Thanks @lovasoa
+* Add docstrings for Dialects, update README (#1016) - Thanks @alamb
+* Add JumpWire to users in README (#990) - Thanks @hexedpackets
+* Add tests for clickhouse: `tokenize == as Token::DoubleEq` (#981)- Thanks @lustefaniak
+
+## [0.38.0] 2023-09-21
+
+### Added
+
+* Support `==`operator for Sqlite (#970) - Thanks @marhoily
+* Support mysql `PARTITION` to table selection (#959) - Thanks  @chunshao90
+* Support `UNNEST` as a table factor for PostgreSQL (#968) @hexedpackets
+* Support MySQL `UNIQUE KEY` syntax (#962) - Thanks @artorias1024
+* Support` `GROUP BY ALL` (#964) - @berkaysynnada
+* Support multiple actions in one ALTER TABLE statement (#960) - Thanks @ForbesLindesay
+* Add `--sqlite param` to CLI (#956) - Thanks @ddol
+
+### Fixed
+* Fix Rust 1.72 clippy lints (#957) - Thanks @alamb
+
+### Changed
+* Add missing token loc in parse err msg (#965) - Thanks @ding-young
+* Change how `ANY` and `ALL` expressions are represented in AST (#963) - Thanks @SeanTroyUWO
+* Show location info in parse errors (#958) - Thanks @MartinNowak
+* Update release documentation (#954) - Thanks @alamb
+* Break test and coverage test into separate jobs (#949) - Thanks @alamb
+
+
+## [0.37.0] 2023-08-22
+
+### Added
+* Support `FOR SYSTEM_TIME AS OF` table time travel clause support, `visit_table_factor` to Visitor (#951) - Thanks @gruuya
+* Support MySQL `auto_increment` offset in table definition (#950) - Thanks @ehoeve
+* Test for mssql table name in square brackets (#952) - Thanks @lovasoa
+* Support additional Postgres `CREATE INDEX` syntax (#943) - Thanks @ForbesLindesay
+* Support `ALTER ROLE` syntax of PostgreSQL and MS SQL Server (#942) - Thanks @r4ntix
+* Support table-level comments (#946) - Thanks @ehoeve
+* Support `DROP TEMPORARY TABLE`, MySQL syntax (#916) - Thanks @liadgiladi
+* Support posgres type alias (#933) - Thanks @Kikkon
+
+### Fixed
+* Clarify the value of the special flag (#948) - Thanks @alamb
+* Fix `SUBSTRING` from/to argument construction for mssql (#947) - Thanks @jmaness
+* Fix: use Rust idiomatic capitalization for newly added DataType enums (#939) - Thanks @Kikkon
+* Fix `BEGIN TRANSACTION` being serialized as `START TRANSACTION` (#935) - Thanks @lovasoa
+* Fix parsing of datetime functions without parenthesis (#930) - Thanks @lovasoa
 
 ## [0.36.1] 2023-07-19
 

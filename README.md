@@ -37,7 +37,7 @@ println!("AST: {:?}", ast);
 This outputs
 
 ```rust
-AST: [Query(Query { ctes: [], body: Select(Select { distinct: false, projection: [UnnamedExpr(Identifier("a")), UnnamedExpr(Identifier("b")), UnnamedExpr(Value(Long(123))), UnnamedExpr(Function(Function { name: ObjectName(["myfunc"]), args: [Identifier("b")], over: None, distinct: false }))], from: [TableWithJoins { relation: Table { name: ObjectName(["table_1"]), alias: None, args: [], with_hints: [] }, joins: [] }], selection: Some(BinaryOp { left: BinaryOp { left: Identifier("a"), op: Gt, right: Identifier("b") }, op: And, right: BinaryOp { left: Identifier("b"), op: Lt, right: Value(Long(100)) } }), group_by: [], having: None }), order_by: [OrderByExpr { expr: Identifier("a"), asc: Some(false) }, OrderByExpr { expr: Identifier("b"), asc: None }], limit: None, offset: None, fetch: None })]
+AST: [Query(Query { ctes: [], body: Select(Select { distinct: false, projection: [UnnamedExpr(Identifier("a")), UnnamedExpr(Identifier("b")), UnnamedExpr(Value(Long(123))), UnnamedExpr(Function(Function { name: ObjectName(["myfunc"]), args: [Identifier("b")], filter: None, over: None, distinct: false }))], from: [TableWithJoins { relation: Table { name: ObjectName(["table_1"]), alias: None, args: [], with_hints: [] }, joins: [] }], selection: Some(BinaryOp { left: BinaryOp { left: Identifier("a"), op: Gt, right: Identifier("b") }, op: And, right: BinaryOp { left: Identifier("b"), op: Lt, right: Value(Long(100)) } }), group_by: [], having: None }), order_by: [OrderByExpr { expr: Identifier("a"), asc: Some(false) }, OrderByExpr { expr: Identifier("b"), asc: None }], limit: None, offset: None, fetch: None })]
 ```
 
 
@@ -61,6 +61,28 @@ column name `x`.
 This crate avoids semantic analysis because it varies drastically
 between dialects and implementations. If you want to do semantic
 analysis, feel free to use this project as a base.
+
+## Preserves Syntax Round Trip 
+
+This crate allows users to recover the original SQL text (with comments removed,
+normalized whitespace and keyword capitalization), which is useful for tools
+that analyze and manipulate SQL.
+
+This means that other than comments, whitespace and the capitalization of
+keywords, the following should hold true for all SQL:
+
+```rust
+// Parse SQL
+let ast = Parser::parse_sql(&GenericDialect, sql).unwrap();
+
+// The original SQL text can be generated from the AST
+assert_eq!(ast[0].to_string(), sql);
+```
+
+There are still some cases in this crate where different SQL with seemingly
+similar semantics are represented with the same AST. We welcome PRs to fix such
+issues and distinguish different syntaxes in the AST.
+
 
 ## SQL compliance
 
@@ -96,7 +118,7 @@ $ cargo run --features json_example --example cli FILENAME.sql [--dialectname]
 ## Users
 
 This parser is currently being used by the [DataFusion] query engine,
-[LocustDB], [Ballista], [GlueSQL], and [Opteryx].
+[LocustDB], [Ballista], [GlueSQL], [Opteryx], [PRQL], [Qrlew], [JumpWire], and [ParadeDB].
 
 If your project is using sqlparser-rs feel free to make a PR to add it
 to this list.
@@ -127,28 +149,36 @@ parser](docs/custom_sql_parser.md).
 ## Contributing
 
 Contributions are highly encouraged! However, the bandwidth we have to
-maintain this crate is fairly limited.
+maintain this crate is limited. Please read the following sections carefully.
 
-Pull requests that add support for or fix a bug in a feature in the
-SQL standard, or a feature in a popular RDBMS, like Microsoft SQL
+### New Syntax
+
+The most commonly accepted PRs add support for or fix a bug in a feature in the
+SQL standard, or a popular RDBMS, such as Microsoft SQL
 Server or PostgreSQL, will likely be accepted after a brief
-review.
+review.  Any SQL feature that is dialect specific should be parsed by *both* the relevant [`Dialect`] 
+as well as [`GenericDialect`].
+
+### Major API Changes
 
 The current maintainers do not plan for any substantial changes to
-this crate's API at this time. And thus, PRs proposing major refactors
+this crate's API. PRs proposing major refactors
 are not likely to be accepted.
 
-Please be aware that, while we hope to review PRs in a reasonably
-timely fashion, it may take a while. In order to speed the process,
+### Testing
+
+While we hope to review PRs in a reasonably
+timely fashion, it may take a week or more. In order to speed the process,
 please make sure the PR passes all CI checks, and includes tests
 demonstrating your code works as intended (and to avoid
 regressions). Remember to also test error paths.
 
 PRs without tests will not be reviewed or merged.  Since the CI
 ensures that `cargo test`, `cargo fmt`, and `cargo clippy`, pass you
-will likely want to run all three commands locally before submitting
+should likely to run all three commands locally before submitting
 your PR.
 
+### Filing Issues
 
 If you are unable to submit a patch, feel free to file an issue instead. Please
 try to include:
@@ -159,8 +189,9 @@ try to include:
   * links to documentation for the feature for a few of the most popular
     databases that support it.
 
-If you need support for a feature, you will likely need to implement
-it yourself. Our goal as maintainers is to facilitate the integration
+Unfortunately, if you need support for a feature, you will likely need to implement
+it yourself, or file a well enough described ticket that another member of the community can do so.
+Our goal as maintainers is to facilitate the integration
 of various features from various contributors, but not to provide the
 implementations ourselves, as we simply don't have the resources.
 
@@ -182,6 +213,12 @@ licensed as above, without any additional terms or conditions.
 [Ballista]: https://github.com/apache/arrow-ballista
 [GlueSQL]: https://github.com/gluesql/gluesql
 [Opteryx]: https://github.com/mabel-dev/opteryx
+[PRQL]: https://github.com/PRQL/prql
+[Qrlew]: https://github.com/Qrlew/qrlew
+[JumpWire]: https://github.com/extragoodlabs/jumpwire
+[ParadeDB]: https://github.com/paradedb/paradedb
 [Pratt Parser]: https://tdop.github.io/
 [sql-2016-grammar]: https://jakewheat.github.io/sql-overview/sql-2016-foundation-grammar.html
 [sql-standard]: https://en.wikipedia.org/wiki/ISO/IEC_9075
+[`Dialect`]: https://docs.rs/sqlparser/latest/sqlparser/dialect/trait.Dialect.html
+[`GenericDialect`]: https://docs.rs/sqlparser/latest/sqlparser/dialect/struct.GenericDialect.html

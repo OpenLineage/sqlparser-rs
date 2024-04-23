@@ -19,12 +19,12 @@ mod test_utils;
 use test_utils::*;
 
 use sqlparser::ast::Expr::{BinaryOp, Identifier, MapAccess};
-use sqlparser::ast::Ident;
 use sqlparser::ast::SelectItem::UnnamedExpr;
 use sqlparser::ast::TableFactor::Table;
 use sqlparser::ast::*;
 
 use sqlparser::dialect::ClickHouseDialect;
+use sqlparser::dialect::GenericDialect;
 
 #[test]
 fn parse_map_access_expr() {
@@ -39,21 +39,26 @@ fn parse_map_access_expr() {
                     value: "string_values".to_string(),
                     quote_style: None,
                 })),
-                keys: vec![Expr::Function(Function {
-                    name: ObjectName(vec!["indexOf".into()]),
-                    args: vec![
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(Ident::new(
-                            "string_names"
-                        )))),
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                            Value::SingleQuotedString("endpoint".to_string())
-                        ))),
-                    ],
-                    over: None,
-                    distinct: false,
-                    special: false,
-                    order_by: vec![],
-                })],
+                keys: vec![MapAccessKey {
+                    key: Expr::Function(Function {
+                        name: ObjectName(vec!["indexOf".into()]),
+                        args: vec![
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(
+                                Ident::new("string_names")
+                            ))),
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                                Value::SingleQuotedString("endpoint".to_string())
+                            ))),
+                        ],
+                        null_treatment: None,
+                        filter: None,
+                        over: None,
+                        distinct: false,
+                        special: false,
+                        order_by: vec![],
+                    }),
+                    syntax: MapAccessSyntax::Bracket
+                }],
             })],
             into: None,
             from: vec![TableWithJoins {
@@ -62,47 +67,55 @@ fn parse_map_access_expr() {
                     alias: None,
                     args: None,
                     with_hints: vec![],
+                    version: None,
+                    partitions: vec![],
                 },
-                joins: vec![]
+                joins: vec![],
             }],
             lateral_views: vec![],
             selection: Some(BinaryOp {
                 left: Box::new(BinaryOp {
                     left: Box::new(Identifier(Ident::new("id"))),
                     op: BinaryOperator::Eq,
-                    right: Box::new(Expr::Value(Value::SingleQuotedString("test".to_string())))
+                    right: Box::new(Expr::Value(Value::SingleQuotedString("test".to_string()))),
                 }),
                 op: BinaryOperator::And,
                 right: Box::new(BinaryOp {
                     left: Box::new(MapAccess {
                         column: Box::new(Identifier(Ident::new("string_value"))),
-                        keys: vec![Expr::Function(Function {
-                            name: ObjectName(vec![Ident::new("indexOf")]),
-                            args: vec![
-                                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(
-                                    Ident::new("string_name")
-                                ))),
-                                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                    Value::SingleQuotedString("app".to_string())
-                                ))),
-                            ],
-                            over: None,
-                            distinct: false,
-                            special: false,
-                            order_by: vec![],
-                        })]
+                        keys: vec![MapAccessKey {
+                            key: Expr::Function(Function {
+                                name: ObjectName(vec![Ident::new("indexOf")]),
+                                args: vec![
+                                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(
+                                        Ident::new("string_name")
+                                    ))),
+                                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                                        Value::SingleQuotedString("app".to_string())
+                                    ))),
+                                ],
+                                null_treatment: None,
+                                filter: None,
+                                over: None,
+                                distinct: false,
+                                special: false,
+                                order_by: vec![],
+                            }),
+                            syntax: MapAccessSyntax::Bracket
+                        }],
                     }),
                     op: BinaryOperator::NotEq,
-                    right: Box::new(Expr::Value(Value::SingleQuotedString("foo".to_string())))
-                })
+                    right: Box::new(Expr::Value(Value::SingleQuotedString("foo".to_string()))),
+                }),
             }),
-            group_by: vec![],
+            group_by: GroupByExpr::Expressions(vec![]),
             cluster_by: vec![],
             distribute_by: vec![],
             sort_by: vec![],
             having: None,
             named_window: vec![],
-            qualify: None
+            qualify: None,
+            value_table_mode: None,
         },
         select
     );
@@ -116,7 +129,7 @@ fn parse_array_expr() {
         &Expr::Array(Array {
             elem: vec![
                 Expr::Value(Value::SingleQuotedString("1".to_string())),
-                Expr::Value(Value::SingleQuotedString("2".to_string()))
+                Expr::Value(Value::SingleQuotedString("2".to_string())),
             ],
             named: false,
         }),
@@ -135,6 +148,8 @@ fn parse_array_fn() {
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(Ident::new("x1")))),
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(Ident::new("x2")))),
             ],
+            null_treatment: None,
+            filter: None,
             over: None,
             distinct: false,
             special: false,
@@ -169,11 +184,14 @@ fn parse_delimited_identifiers() {
             alias,
             args,
             with_hints,
+            version,
+            partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
             assert_eq!(Ident::with_quote('"', "alias"), alias.unwrap().name);
             assert!(args.is_none());
             assert!(with_hints.is_empty());
+            assert!(version.is_none());
         }
         _ => panic!("Expecting TableFactor::Table"),
     }
@@ -190,6 +208,8 @@ fn parse_delimited_identifiers() {
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
             args: vec![],
+            null_treatment: None,
+            filter: None,
             over: None,
             distinct: false,
             special: false,
@@ -211,115 +231,6 @@ fn parse_delimited_identifiers() {
 }
 
 #[test]
-fn parse_like() {
-    fn chk(negated: bool) {
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}LIKE '%a'",
-            if negated { "NOT " } else { "" }
-        );
-        let select = clickhouse().verified_only_select(sql);
-        assert_eq!(
-            Expr::Like {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: None,
-            },
-            select.selection.unwrap()
-        );
-
-        // Test with escape char
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}LIKE '%a' ESCAPE '\\'",
-            if negated { "NOT " } else { "" }
-        );
-        let select = clickhouse().verified_only_select(sql);
-        assert_eq!(
-            Expr::Like {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: Some('\\'),
-            },
-            select.selection.unwrap()
-        );
-
-        // This statement tests that LIKE and NOT LIKE have the same precedence.
-        // This was previously mishandled (#81).
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}LIKE '%a' IS NULL",
-            if negated { "NOT " } else { "" }
-        );
-        let select = clickhouse().verified_only_select(sql);
-        assert_eq!(
-            Expr::IsNull(Box::new(Expr::Like {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: None,
-            })),
-            select.selection.unwrap()
-        );
-    }
-    chk(false);
-    chk(true);
-}
-
-#[test]
-fn parse_similar_to() {
-    fn chk(negated: bool) {
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}SIMILAR TO '%a'",
-            if negated { "NOT " } else { "" }
-        );
-        let select = clickhouse().verified_only_select(sql);
-        assert_eq!(
-            Expr::SimilarTo {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: None,
-            },
-            select.selection.unwrap()
-        );
-
-        // Test with escape char
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}SIMILAR TO '%a' ESCAPE '\\'",
-            if negated { "NOT " } else { "" }
-        );
-        let select = clickhouse().verified_only_select(sql);
-        assert_eq!(
-            Expr::SimilarTo {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: Some('\\'),
-            },
-            select.selection.unwrap()
-        );
-
-        // This statement tests that SIMILAR TO and NOT SIMILAR TO have the same precedence.
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}SIMILAR TO '%a' ESCAPE '\\' IS NULL",
-            if negated { "NOT " } else { "" }
-        );
-        let select = clickhouse().verified_only_select(sql);
-        assert_eq!(
-            Expr::IsNull(Box::new(Expr::SimilarTo {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: Some('\\'),
-            })),
-            select.selection.unwrap()
-        );
-    }
-    chk(false);
-    chk(true);
-}
-
-#[test]
 fn parse_create_table() {
     clickhouse().verified_stmt(r#"CREATE TABLE "x" ("a" "int") ENGINE=MergeTree ORDER BY ("x")"#);
     clickhouse().one_statement_parses_to(
@@ -331,9 +242,47 @@ fn parse_create_table() {
     );
 }
 
+#[test]
+fn parse_double_equal() {
+    clickhouse().one_statement_parses_to(
+        r#"SELECT foo FROM bar WHERE buz == 'buz'"#,
+        r#"SELECT foo FROM bar WHERE buz = 'buz'"#,
+    );
+}
+
+#[test]
+fn parse_limit_by() {
+    clickhouse_and_generic().verified_stmt(
+        r#"SELECT * FROM default.last_asset_runs_mv ORDER BY created_at DESC LIMIT 1 BY asset"#,
+    );
+    clickhouse_and_generic().verified_stmt(
+        r#"SELECT * FROM default.last_asset_runs_mv ORDER BY created_at DESC LIMIT 1 BY asset, toStartOfDay(created_at)"#,
+    );
+}
+
+#[test]
+fn parse_select_star_except() {
+    clickhouse().verified_stmt("SELECT * EXCEPT (prev_status) FROM anomalies");
+}
+
+#[test]
+fn parse_select_star_except_no_parens() {
+    clickhouse().one_statement_parses_to(
+        "SELECT * EXCEPT prev_status FROM anomalies",
+        "SELECT * EXCEPT (prev_status) FROM anomalies",
+    );
+}
+
 fn clickhouse() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(ClickHouseDialect {})],
+        options: None,
+    }
+}
+
+fn clickhouse_and_generic() -> TestedDialects {
+    TestedDialects {
+        dialects: vec![Box::new(ClickHouseDialect {}), Box::new(GenericDialect {})],
         options: None,
     }
 }

@@ -64,6 +64,11 @@ macro_rules! dialect_of {
 /// custom extensions or various historical reasons. This trait
 /// encapsulates the parsing differences between dialects.
 ///
+/// [`GenericDialect`] is the most permissive dialect, and parses the union of
+/// all the other dialects, when there is no ambiguity. However, it does not
+/// currently allow `CREATE TABLE` statements without types specified for all
+/// columns; use [`SQLiteDialect`] if you require that.
+///
 /// # Examples
 /// Most users create a [`Dialect`] directly, as shown on the [module
 /// level documentation]:
@@ -86,13 +91,26 @@ macro_rules! dialect_of {
 ///
 /// [module level documentation]: crate
 pub trait Dialect: Debug + Any {
+    /// Determine the [`TypeId`] of this dialect.
+    ///
+    /// By default, return the same [`TypeId`] as [`Any::type_id`]. Can be overridden
+    /// by dialects that behave like other dialects
+    /// (for example when wrapping a dialect).
+    fn dialect(&self) -> TypeId {
+        self.type_id()
+    }
+
     /// Determine if a character starts a quoted identifier. The default
     /// implementation, accepting "double quoted" ids is both ANSI-compliant
     /// and appropriate for most dialects (with the notable exception of
     /// MySQL, MS SQL, and sqlite). You can accept one of characters listed
     /// in `Word::matching_end_quote` here
     fn is_delimited_identifier_start(&self, ch: char) -> bool {
-        ch == '"'
+        ch == '"' || ch == '`'
+    }
+    /// Return the character used to quote identifiers.
+    fn identifier_quote_style(&self, _identifier: &str) -> Option<char> {
+        None
     }
     /// Determine if quoted characters are proper for identifier
     fn is_proper_identifier_inside_quotes(&self, mut _chars: Peekable<Chars<'_>>) -> bool {
@@ -102,6 +120,23 @@ pub trait Dialect: Debug + Any {
     fn is_identifier_start(&self, ch: char) -> bool;
     /// Determine if a character is a valid unquoted identifier character
     fn is_identifier_part(&self, ch: char) -> bool;
+    /// Determine if the dialect supports escaping characters via '\' in string literals.
+    ///
+    /// Some dialects like BigQuery and Snowflake support this while others like
+    /// Postgres do not. Such that the following is accepted by the former but
+    /// rejected by the latter.
+    /// ```sql
+    /// SELECT 'ab\'cd';
+    /// ```
+    ///
+    /// Conversely, such dialects reject the following statement which
+    /// otherwise would be valid in the other dialects.
+    /// ```sql
+    /// SELECT '\';
+    /// ```
+    fn supports_string_literal_backslash_escape(&self) -> bool {
+        false
+    }
     /// Does the dialect support `FILTER (WHERE expr)` for aggregate queries?
     fn supports_filter_during_aggregation(&self) -> bool {
         false
@@ -115,6 +150,27 @@ pub trait Dialect: Debug + Any {
     }
     /// Returns true if the dialects supports `group sets, roll up, or cube` expressions.
     fn supports_group_by_expr(&self) -> bool {
+        false
+    }
+    /// Returns true if the dialect supports the MATCH_RECOGNIZE operation.
+    fn supports_match_recognize(&self) -> bool {
+        false
+    }
+    /// Returns true if the dialect supports `(NOT) IN ()` expressions
+    fn supports_in_empty_list(&self) -> bool {
+        false
+    }
+    /// Returns true if the dialect supports `BEGIN {DEFERRED | IMMEDIATE | EXCLUSIVE} [TRANSACTION]` statements
+    fn supports_start_transaction_modifier(&self) -> bool {
+        false
+    }
+    /// Returns true if the dialect supports named arguments of the form FUN(a = '1', b = '2').
+    fn supports_named_fn_args_with_eq_operator(&self) -> bool {
+        false
+    }
+    /// Returns true if the dialect has a CONVERT function which accepts a type first
+    /// and an expression second, e.g. `CONVERT(varchar, 1)`
+    fn convert_type_before_value(&self) -> bool {
         false
     }
     /// Dialect-specific prefix parser override
@@ -148,7 +204,7 @@ impl dyn Dialect {
     #[inline]
     pub fn is<T: Dialect>(&self) -> bool {
         // borrowed from `Any` implementation
-        TypeId::of::<T>() == self.type_id()
+        TypeId::of::<T>() == self.dialect()
     }
 }
 
@@ -176,8 +232,6 @@ pub fn dialect_from_str(dialect_name: impl AsRef<str>) -> Option<Box<dyn Dialect
 
 #[cfg(test)]
 mod tests {
-    use super::ansi::AnsiDialect;
-    use super::generic::GenericDialect;
     use super::*;
 
     struct DialectHolder<'a> {
@@ -231,5 +285,119 @@ mod tests {
 
     fn parse_dialect(v: &str) -> Box<dyn Dialect> {
         dialect_from_str(v).unwrap()
+    }
+
+    #[test]
+    fn identifier_quote_style() {
+        let tests: Vec<(&dyn Dialect, &str, Option<char>)> = vec![
+            (&GenericDialect {}, "id", None),
+            (&SQLiteDialect {}, "id", Some('`')),
+            (&PostgreSqlDialect {}, "id", Some('"')),
+        ];
+
+        for (dialect, ident, expected) in tests {
+            let actual = dialect.identifier_quote_style(ident);
+
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn parse_with_wrapped_dialect() {
+        /// Wrapper for a dialect. In a real-world example, this wrapper
+        /// would tweak the behavior of the dialect. For the test case,
+        /// it wraps all methods unaltered.
+        #[derive(Debug)]
+        struct WrappedDialect(MySqlDialect);
+
+        impl Dialect for WrappedDialect {
+            fn dialect(&self) -> std::any::TypeId {
+                self.0.dialect()
+            }
+
+            fn is_identifier_start(&self, ch: char) -> bool {
+                self.0.is_identifier_start(ch)
+            }
+
+            fn is_delimited_identifier_start(&self, ch: char) -> bool {
+                self.0.is_delimited_identifier_start(ch)
+            }
+
+            fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
+                self.0.identifier_quote_style(identifier)
+            }
+
+            fn supports_string_literal_backslash_escape(&self) -> bool {
+                self.0.supports_string_literal_backslash_escape()
+            }
+
+            fn is_proper_identifier_inside_quotes(
+                &self,
+                chars: std::iter::Peekable<std::str::Chars<'_>>,
+            ) -> bool {
+                self.0.is_proper_identifier_inside_quotes(chars)
+            }
+
+            fn supports_filter_during_aggregation(&self) -> bool {
+                self.0.supports_filter_during_aggregation()
+            }
+
+            fn supports_within_after_array_aggregation(&self) -> bool {
+                self.0.supports_within_after_array_aggregation()
+            }
+
+            fn supports_group_by_expr(&self) -> bool {
+                self.0.supports_group_by_expr()
+            }
+
+            fn supports_in_empty_list(&self) -> bool {
+                self.0.supports_in_empty_list()
+            }
+
+            fn convert_type_before_value(&self) -> bool {
+                self.0.convert_type_before_value()
+            }
+
+            fn parse_prefix(
+                &self,
+                parser: &mut sqlparser::parser::Parser,
+            ) -> Option<Result<Expr, sqlparser::parser::ParserError>> {
+                self.0.parse_prefix(parser)
+            }
+
+            fn parse_infix(
+                &self,
+                parser: &mut sqlparser::parser::Parser,
+                expr: &Expr,
+                precedence: u8,
+            ) -> Option<Result<Expr, sqlparser::parser::ParserError>> {
+                self.0.parse_infix(parser, expr, precedence)
+            }
+
+            fn get_next_precedence(
+                &self,
+                parser: &sqlparser::parser::Parser,
+            ) -> Option<Result<u8, sqlparser::parser::ParserError>> {
+                self.0.get_next_precedence(parser)
+            }
+
+            fn parse_statement(
+                &self,
+                parser: &mut sqlparser::parser::Parser,
+            ) -> Option<Result<Statement, sqlparser::parser::ParserError>> {
+                self.0.parse_statement(parser)
+            }
+
+            fn is_identifier_part(&self, ch: char) -> bool {
+                self.0.is_identifier_part(ch)
+            }
+        }
+
+        #[allow(clippy::needless_raw_string_hashes)]
+        let statement = r#"SELECT 'Wayne\'s World'"#;
+        let res1 = Parser::parse_sql(&MySqlDialect {}, statement);
+        let res2 = Parser::parse_sql(&WrappedDialect(MySqlDialect {}), statement);
+        assert!(res1.is_ok());
+        assert_eq!(res1, res2);
     }
 }

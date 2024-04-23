@@ -16,6 +16,7 @@ use core::str::Chars;
 
 use super::PostgreSqlDialect;
 
+/// A [`Dialect`] for [RedShift](https://aws.amazon.com/redshift/)
 #[derive(Debug)]
 pub struct RedshiftSqlDialect {}
 
@@ -51,5 +52,11 @@ impl Dialect for RedshiftSqlDialect {
     fn is_identifier_part(&self, ch: char) -> bool {
         // Extends Postgres dialect with sharp
         PostgreSqlDialect {}.is_identifier_part(ch) || ch == '#'
+    }
+
+    /// redshift has `CONVERT(type, value)` instead of `CONVERT(value, type)`
+    /// <https://docs.aws.amazon.com/redshift/latest/dg/r_CONVERT_function.html>
+    fn convert_type_before_value(&self) -> bool {
+        true
     }
 }

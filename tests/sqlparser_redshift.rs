@@ -16,6 +16,7 @@ mod test_utils;
 use test_utils::*;
 
 use sqlparser::ast::*;
+use sqlparser::dialect::GenericDialect;
 use sqlparser::dialect::RedshiftSqlDialect;
 
 #[test]
@@ -45,6 +46,8 @@ fn test_square_brackets_over_db_schema_table_name() {
                 alias: None,
                 args: None,
                 with_hints: vec![],
+                version: None,
+                partitions: vec![],
             },
             joins: vec![],
         }
@@ -89,6 +92,8 @@ fn test_double_quotes_over_db_schema_table_name() {
                 alias: None,
                 args: None,
                 with_hints: vec![],
+                version: None,
+                partitions: vec![],
             },
             joins: vec![],
         }
@@ -108,11 +113,14 @@ fn parse_delimited_identifiers() {
             alias,
             args,
             with_hints,
+            version,
+            partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
             assert_eq!(Ident::with_quote('"', "alias"), alias.unwrap().name);
             assert!(args.is_none());
             assert!(with_hints.is_empty());
+            assert!(version.is_none());
         }
         _ => panic!("Expecting TableFactor::Table"),
     }
@@ -129,6 +137,8 @@ fn parse_delimited_identifiers() {
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
             args: vec![],
+            null_treatment: None,
+            filter: None,
             over: None,
             distinct: false,
             special: false,
@@ -149,118 +159,16 @@ fn parse_delimited_identifiers() {
     //TODO verified_stmt(r#"UPDATE foo SET "bar" = 5"#);
 }
 
-#[test]
-fn parse_like() {
-    fn chk(negated: bool) {
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}LIKE '%a'",
-            if negated { "NOT " } else { "" }
-        );
-        let select = redshift().verified_only_select(sql);
-        assert_eq!(
-            Expr::Like {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: None,
-            },
-            select.selection.unwrap()
-        );
-
-        // Test with escape char
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}LIKE '%a' ESCAPE '\\'",
-            if negated { "NOT " } else { "" }
-        );
-        let select = redshift().verified_only_select(sql);
-        assert_eq!(
-            Expr::Like {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: Some('\\'),
-            },
-            select.selection.unwrap()
-        );
-
-        // This statement tests that LIKE and NOT LIKE have the same precedence.
-        // This was previously mishandled (#81).
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}LIKE '%a' IS NULL",
-            if negated { "NOT " } else { "" }
-        );
-        let select = redshift().verified_only_select(sql);
-        assert_eq!(
-            Expr::IsNull(Box::new(Expr::Like {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: None,
-            })),
-            select.selection.unwrap()
-        );
-    }
-    chk(false);
-    chk(true);
-}
-
-#[test]
-fn parse_similar_to() {
-    fn chk(negated: bool) {
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}SIMILAR TO '%a'",
-            if negated { "NOT " } else { "" }
-        );
-        let select = redshift().verified_only_select(sql);
-        assert_eq!(
-            Expr::SimilarTo {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: None,
-            },
-            select.selection.unwrap()
-        );
-
-        // Test with escape char
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}SIMILAR TO '%a' ESCAPE '\\'",
-            if negated { "NOT " } else { "" }
-        );
-        let select = redshift().verified_only_select(sql);
-        assert_eq!(
-            Expr::SimilarTo {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: Some('\\'),
-            },
-            select.selection.unwrap()
-        );
-
-        // This statement tests that SIMILAR TO and NOT SIMILAR TO have the same precedence.
-        let sql = &format!(
-            "SELECT * FROM customers WHERE name {}SIMILAR TO '%a' ESCAPE '\\' IS NULL",
-            if negated { "NOT " } else { "" }
-        );
-        let select = redshift().verified_only_select(sql);
-        assert_eq!(
-            Expr::IsNull(Box::new(Expr::SimilarTo {
-                expr: Box::new(Expr::Identifier(Ident::new("name"))),
-                negated,
-                pattern: Box::new(Expr::Value(Value::SingleQuotedString("%a".to_string()))),
-                escape_char: Some('\\'),
-            })),
-            select.selection.unwrap()
-        );
-    }
-    chk(false);
-    chk(true);
-}
-
 fn redshift() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(RedshiftSqlDialect {})],
+        options: None,
+    }
+}
+
+fn redshift_and_generic() -> TestedDialects {
+    TestedDialects {
+        dialects: vec![Box::new(RedshiftSqlDialect {}), Box::new(GenericDialect {})],
         options: None,
     }
 }
@@ -273,4 +181,10 @@ fn test_sharp() {
         SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("#_of_values"))),
         select.projection[0]
     );
+}
+
+#[test]
+fn test_create_view_with_no_schema_binding() {
+    redshift_and_generic()
+        .verified_stmt("CREATE VIEW myevent AS SELECT eventname FROM event WITH NO SCHEMA BINDING");
 }

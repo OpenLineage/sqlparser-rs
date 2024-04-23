@@ -28,13 +28,14 @@ use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec};
 
+/// A [`Dialect`] for [Snowflake](https://www.snowflake.com/)
 #[derive(Debug, Default)]
 pub struct SnowflakeDialect;
 
 impl Dialect for SnowflakeDialect {
     // see https://docs.snowflake.com/en/sql-reference/identifiers-syntax.html
     fn is_identifier_start(&self, ch: char) -> bool {
-        ch.is_ascii_lowercase() || ch.is_ascii_uppercase() || ch == '_' || ch == '@' || ch == '%'
+        ch.is_ascii_lowercase() || ch.is_ascii_uppercase() || ch == '_'
     }
 
     fn is_identifier_part(&self, ch: char) -> bool {
@@ -43,11 +44,18 @@ impl Dialect for SnowflakeDialect {
             || ch.is_ascii_digit()
             || ch == '$'
             || ch == '_'
-            || ch == '/'
-            || ch == '~'
+    }
+
+    // See https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#escape_sequences
+    fn supports_string_literal_backslash_escape(&self) -> bool {
+        true
     }
 
     fn supports_within_after_array_aggregation(&self) -> bool {
+        true
+    }
+
+    fn supports_match_recognize(&self) -> bool {
         true
     }
 
@@ -92,7 +100,7 @@ pub fn parse_create_stage(
 ) -> Result<Statement, ParserError> {
     //[ IF NOT EXISTS ]
     let if_not_exists = parser.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-    let name = parser.parse_object_name()?;
+    let name = parser.parse_object_name(false)?;
     let mut directory_table_params = Vec::new();
     let mut file_format = Vec::new();
     let mut copy_options = Vec::new();
@@ -147,8 +155,52 @@ pub fn parse_create_stage(
     })
 }
 
+pub fn parse_stage_name_identifier(parser: &mut Parser) -> Result<Ident, ParserError> {
+    let mut ident = String::new();
+    while let Some(next_token) = parser.next_token_no_skip() {
+        match &next_token.token {
+            Token::Whitespace(_) => break,
+            Token::Period => {
+                parser.prev_token();
+                break;
+            }
+            Token::RParen => {
+                parser.prev_token();
+                break;
+            }
+            Token::AtSign => ident.push('@'),
+            Token::Tilde => ident.push('~'),
+            Token::Mod => ident.push('%'),
+            Token::Div => ident.push('/'),
+            Token::Word(w) => ident.push_str(&w.value),
+            _ => return parser.expected("stage name identifier", parser.peek_token()),
+        }
+    }
+    Ok(Ident::new(ident))
+}
+
+pub fn parse_snowflake_stage_name(parser: &mut Parser) -> Result<ObjectName, ParserError> {
+    match parser.next_token().token {
+        Token::AtSign => {
+            parser.prev_token();
+            let mut idents = vec![];
+            loop {
+                idents.push(parse_stage_name_identifier(parser)?);
+                if !parser.consume_token(&Token::Period) {
+                    break;
+                }
+            }
+            Ok(ObjectName(idents))
+        }
+        _ => {
+            parser.prev_token();
+            Ok(parser.parse_object_name(false)?)
+        }
+    }
+}
+
 pub fn parse_copy_into(parser: &mut Parser) -> Result<Statement, ParserError> {
-    let into: ObjectName = parser.parse_object_name()?;
+    let into: ObjectName = parse_snowflake_stage_name(parser)?;
     let mut files: Vec<String> = vec![];
     let mut from_transformations: Option<Vec<StageLoadSelectItem>> = None;
     let from_stage_alias;
@@ -164,7 +216,7 @@ pub fn parse_copy_into(parser: &mut Parser) -> Result<Statement, ParserError> {
             from_transformations = parse_select_items_for_data_load(parser)?;
 
             parser.expect_keyword(Keyword::FROM)?;
-            from_stage = parser.parse_object_name()?;
+            from_stage = parse_snowflake_stage_name(parser)?;
             stage_params = parse_stage_params(parser)?;
 
             // as
@@ -180,7 +232,7 @@ pub fn parse_copy_into(parser: &mut Parser) -> Result<Statement, ParserError> {
         }
         _ => {
             parser.prev_token();
-            from_stage = parser.parse_object_name()?;
+            from_stage = parse_snowflake_stage_name(parser)?;
             stage_params = parse_stage_params(parser)?;
 
             // as
