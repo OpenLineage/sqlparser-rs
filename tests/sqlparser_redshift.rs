@@ -48,6 +48,7 @@ fn test_square_brackets_over_db_schema_table_name() {
                 with_hints: vec![],
                 version: None,
                 partitions: vec![],
+                with_ordinality: false,
             },
             joins: vec![],
         }
@@ -94,6 +95,7 @@ fn test_double_quotes_over_db_schema_table_name() {
                 with_hints: vec![],
                 version: None,
                 partitions: vec![],
+                with_ordinality: false,
             },
             joins: vec![],
         }
@@ -114,6 +116,7 @@ fn parse_delimited_identifiers() {
             args,
             with_hints,
             version,
+            with_ordinality: _,
             partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
@@ -136,13 +139,16 @@ fn parse_delimited_identifiers() {
     assert_eq!(
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
-            args: vec![],
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![],
+                clauses: vec![],
+            }),
             null_treatment: None,
             filter: None,
             over: None,
-            distinct: false,
-            special: false,
-            order_by: vec![],
+            within_group: vec![],
         }),
         expr_from_projection(&select.projection[1]),
     );

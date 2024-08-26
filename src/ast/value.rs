@@ -42,17 +42,42 @@ pub enum Value {
     SingleQuotedString(String),
     // $<tag_name>$string value$<tag_name>$ (postgres syntax)
     DollarQuotedString(DollarQuotedString),
+    /// Triple single quoted strings: Example '''abc'''
+    /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals)
+    TripleSingleQuotedString(String),
+    /// Triple double quoted strings: Example """abc"""
+    /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals)
+    TripleDoubleQuotedString(String),
     /// e'string value' (postgres extension)
     /// See [Postgres docs](https://www.postgresql.org/docs/8.3/sql-syntax-lexical.html#SQL-SYNTAX-STRINGS)
     /// for more details.
     EscapedStringLiteral(String),
+    /// u&'string value' (postgres extension)
+    /// See [Postgres docs](https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-STRINGS-UESCAPE)
+    /// for more details.
+    UnicodeStringLiteral(String),
     /// B'string value'
     SingleQuotedByteStringLiteral(String),
     /// B"string value"
     DoubleQuotedByteStringLiteral(String),
-    /// R'string value' or r'string value' or r"string value"
-    /// <https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals>
-    RawStringLiteral(String),
+    /// Triple single quoted literal with byte string prefix. Example `B'''abc'''`
+    /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals)
+    TripleSingleQuotedByteStringLiteral(String),
+    /// Triple double quoted literal with byte string prefix. Example `B"""abc"""`
+    /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals)
+    TripleDoubleQuotedByteStringLiteral(String),
+    /// Single quoted literal with raw string prefix. Example `R'abc'`
+    /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals)
+    SingleQuotedRawStringLiteral(String),
+    /// Double quoted literal with raw string prefix. Example `R"abc"`
+    /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals)
+    DoubleQuotedRawStringLiteral(String),
+    /// Triple single quoted literal with raw string prefix. Example `R'''abc'''`
+    /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals)
+    TripleSingleQuotedRawStringLiteral(String),
+    /// Triple double quoted literal with raw string prefix. Example `R"""abc"""`
+    /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals)
+    TripleDoubleQuotedRawStringLiteral(String),
     /// N'string value'
     NationalStringLiteral(String),
     /// X'hex value'
@@ -65,8 +90,6 @@ pub enum Value {
     Null,
     /// `?` or `$` Prepared statement arg placeholder
     Placeholder(String),
-    /// Add support of snowflake field:key - key should be a value
-    UnQuotedString(String),
 }
 
 impl fmt::Display for Value {
@@ -75,17 +98,28 @@ impl fmt::Display for Value {
             Value::Number(v, l) => write!(f, "{}{long}", v, long = if *l { "L" } else { "" }),
             Value::DoubleQuotedString(v) => write!(f, "\"{}\"", escape_double_quote_string(v)),
             Value::SingleQuotedString(v) => write!(f, "'{}'", escape_single_quote_string(v)),
+            Value::TripleSingleQuotedString(v) => {
+                write!(f, "'''{v}'''")
+            }
+            Value::TripleDoubleQuotedString(v) => {
+                write!(f, r#""""{v}""""#)
+            }
             Value::DollarQuotedString(v) => write!(f, "{v}"),
             Value::EscapedStringLiteral(v) => write!(f, "E'{}'", escape_escaped_string(v)),
+            Value::UnicodeStringLiteral(v) => write!(f, "U&'{}'", escape_unicode_string(v)),
             Value::NationalStringLiteral(v) => write!(f, "N'{v}'"),
             Value::HexStringLiteral(v) => write!(f, "X'{v}'"),
             Value::Boolean(v) => write!(f, "{v}"),
             Value::SingleQuotedByteStringLiteral(v) => write!(f, "B'{v}'"),
             Value::DoubleQuotedByteStringLiteral(v) => write!(f, "B\"{v}\""),
-            Value::RawStringLiteral(v) => write!(f, "R'{v}'"),
+            Value::TripleSingleQuotedByteStringLiteral(v) => write!(f, "B'''{v}'''"),
+            Value::TripleDoubleQuotedByteStringLiteral(v) => write!(f, r#"B"""{v}""""#),
+            Value::SingleQuotedRawStringLiteral(v) => write!(f, "R'{v}'"),
+            Value::DoubleQuotedRawStringLiteral(v) => write!(f, "R\"{v}\""),
+            Value::TripleSingleQuotedRawStringLiteral(v) => write!(f, "R'''{v}'''"),
+            Value::TripleDoubleQuotedRawStringLiteral(v) => write!(f, r#"R"""{v}""""#),
             Value::Null => write!(f, "NULL"),
             Value::Placeholder(v) => write!(f, "{v}"),
-            Value::UnQuotedString(v) => write!(f, "{v}"),
         }
     }
 }
@@ -316,6 +350,41 @@ impl<'a> fmt::Display for EscapeEscapedStringLiteral<'a> {
 
 pub fn escape_escaped_string(s: &str) -> EscapeEscapedStringLiteral<'_> {
     EscapeEscapedStringLiteral(s)
+}
+
+pub struct EscapeUnicodeStringLiteral<'a>(&'a str);
+
+impl<'a> fmt::Display for EscapeUnicodeStringLiteral<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for c in self.0.chars() {
+            match c {
+                '\'' => {
+                    write!(f, "''")?;
+                }
+                '\\' => {
+                    write!(f, r#"\\"#)?;
+                }
+                x if x.is_ascii() => {
+                    write!(f, "{}", c)?;
+                }
+                _ => {
+                    let codepoint = c as u32;
+                    // if the character fits in 32 bits, we can use the \XXXX format
+                    // otherwise, we need to use the \+XXXXXX format
+                    if codepoint <= 0xFFFF {
+                        write!(f, "\\{:04X}", codepoint)?;
+                    } else {
+                        write!(f, "\\+{:06X}", codepoint)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn escape_unicode_string(s: &str) -> EscapeUnicodeStringLiteral<'_> {
+    EscapeUnicodeStringLiteral(s)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

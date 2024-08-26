@@ -16,10 +16,15 @@
 
 #[macro_use]
 mod test_utils;
+
 use test_utils::*;
 
+use sqlparser::ast::DataType::{Int, Text};
+use sqlparser::ast::DeclareAssignment::MsSqlAssignment;
+use sqlparser::ast::Value::SingleQuotedString;
 use sqlparser::ast::*;
 use sqlparser::dialect::{GenericDialect, MsSqlDialect};
+use sqlparser::parser::{Parser, ParserError};
 
 #[test]
 fn parse_mssql_identifiers() {
@@ -59,6 +64,7 @@ fn parse_table_time_travel() {
                     Value::SingleQuotedString(version)
                 ))),
                 partitions: vec![],
+                with_ordinality: false,
             },
             joins: vec![]
         },]
@@ -97,7 +103,9 @@ fn parse_create_procedure() {
                 fetch: None,
                 locks: vec![],
                 for_clause: None,
-                order_by: vec![],
+                order_by: None,
+                settings: None,
+                format_clause: None,
                 body: Box::new(SetExpr::Select(Box::new(Select {
                     distinct: None,
                     top: None,
@@ -105,15 +113,18 @@ fn parse_create_procedure() {
                     into: None,
                     from: vec![],
                     lateral_views: vec![],
+                    prewhere: None,
                     selection: None,
-                    group_by: GroupByExpr::Expressions(vec![]),
+                    group_by: GroupByExpr::Expressions(vec![], vec![]),
                     cluster_by: vec![],
                     distribute_by: vec![],
                     sort_by: vec![],
                     having: None,
                     named_window: vec![],
+                    window_before_qualify: false,
                     qualify: None,
                     value_table_mode: None,
+                    connect_by: None,
                 })))
             }))],
             params: Some(vec![
@@ -325,6 +336,7 @@ fn parse_delimited_identifiers() {
             args,
             with_hints,
             version,
+            with_ordinality: _,
             partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
@@ -347,13 +359,16 @@ fn parse_delimited_identifiers() {
     assert_eq!(
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
-            args: vec![],
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![],
+                clauses: vec![],
+            }),
             null_treatment: None,
             filter: None,
             over: None,
-            distinct: false,
-            special: false,
-            order_by: vec![],
+            within_group: vec![],
         }),
         expr_from_projection(&select.projection[1]),
     );
@@ -429,15 +444,52 @@ fn parse_for_json_expect_ast() {
 }
 
 #[test]
+fn parse_ampersand_arobase() {
+    // In SQL Server, a&@b means (a) & (@b), in PostgreSQL it means (a) &@ (b)
+    ms().expr_parses_to("a&@b", "a & @b");
+}
+
+#[test]
 fn parse_cast_varchar_max() {
     ms_and_generic().verified_expr("CAST('foo' AS VARCHAR(MAX))");
+    ms_and_generic().verified_expr("CAST('foo' AS NVARCHAR(MAX))");
 }
 
 #[test]
 fn parse_convert() {
+    let sql = "CONVERT(INT, 1, 2, 3, NULL)";
+    let Expr::Convert {
+        expr,
+        data_type,
+        charset,
+        target_before_value,
+        styles,
+    } = ms().verified_expr(sql)
+    else {
+        unreachable!()
+    };
+    assert_eq!(Expr::Value(number("1")), *expr);
+    assert_eq!(Some(DataType::Int(None)), data_type);
+    assert!(charset.is_none());
+    assert!(target_before_value);
+    assert_eq!(
+        vec![
+            Expr::Value(number("2")),
+            Expr::Value(number("3")),
+            Expr::Value(Value::Null),
+        ],
+        styles
+    );
+
     ms().verified_expr("CONVERT(VARCHAR(MAX), 'foo')");
     ms().verified_expr("CONVERT(VARCHAR(10), 'foo')");
     ms().verified_expr("CONVERT(DECIMAL(10,5), 12.55)");
+
+    let error_sql = "SELECT CONVERT(INT, 'foo',) FROM T";
+    assert_eq!(
+        ParserError::ParserError("Expected: an expression:, found: )".to_owned()),
+        ms().parse_sql_statements(error_sql).unwrap_err()
+    );
 }
 
 #[test]
@@ -476,32 +528,128 @@ fn parse_substring_in_select() {
                                 with_hints: vec![],
                                 version: None,
                                 partitions: vec![],
+                                with_ordinality: false,
                             },
                             joins: vec![]
                         }],
                         lateral_views: vec![],
+                        prewhere: None,
                         selection: None,
-                        group_by: GroupByExpr::Expressions(vec![]),
+                        group_by: GroupByExpr::Expressions(vec![], vec![]),
                         cluster_by: vec![],
                         distribute_by: vec![],
                         sort_by: vec![],
                         having: None,
                         named_window: vec![],
                         qualify: None,
+                        window_before_qualify: false,
                         value_table_mode: None,
+                        connect_by: None,
                     }))),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 }),
                 query
             );
         }
         _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_mssql_declare() {
+    let sql = "DECLARE @foo CURSOR, @bar INT, @baz AS TEXT = 'foobar';";
+    let ast = Parser::parse_sql(&MsSqlDialect {}, sql).unwrap();
+
+    assert_eq!(
+        vec![Statement::Declare {
+            stmts: vec![
+                Declare {
+                    names: vec![Ident {
+                        value: "@foo".to_string(),
+                        quote_style: None
+                    }],
+                    data_type: None,
+                    assignment: None,
+                    declare_type: Some(DeclareType::Cursor),
+                    binary: None,
+                    sensitive: None,
+                    scroll: None,
+                    hold: None,
+                    for_query: None
+                },
+                Declare {
+                    names: vec![Ident {
+                        value: "@bar".to_string(),
+                        quote_style: None
+                    }],
+                    data_type: Some(Int(None)),
+                    assignment: None,
+                    declare_type: None,
+                    binary: None,
+                    sensitive: None,
+                    scroll: None,
+                    hold: None,
+                    for_query: None
+                },
+                Declare {
+                    names: vec![Ident {
+                        value: "@baz".to_string(),
+                        quote_style: None
+                    }],
+                    data_type: Some(Text),
+                    assignment: Some(MsSqlAssignment(Box::new(Expr::Value(SingleQuotedString(
+                        "foobar".to_string()
+                    ))))),
+                    declare_type: None,
+                    binary: None,
+                    sensitive: None,
+                    scroll: None,
+                    hold: None,
+                    for_query: None
+                }
+            ]
+        }],
+        ast
+    );
+}
+
+#[test]
+fn parse_use() {
+    let valid_object_names = [
+        "mydb",
+        "SCHEMA",
+        "DATABASE",
+        "CATALOG",
+        "WAREHOUSE",
+        "DEFAULT",
+    ];
+    let quote_styles = ['\'', '"'];
+    for object_name in &valid_object_names {
+        // Test single identifier without quotes
+        assert_eq!(
+            ms().verified_stmt(&format!("USE {}", object_name)),
+            Statement::Use(Use::Object(ObjectName(vec![Ident::new(
+                object_name.to_string()
+            )])))
+        );
+        for &quote in &quote_styles {
+            // Test single identifier with different type of quotes
+            assert_eq!(
+                ms().verified_stmt(&format!("USE {}{}{}", quote, object_name, quote)),
+                Statement::Use(Use::Object(ObjectName(vec![Ident::with_quote(
+                    quote,
+                    object_name.to_string(),
+                )])))
+            );
+        }
     }
 }
 

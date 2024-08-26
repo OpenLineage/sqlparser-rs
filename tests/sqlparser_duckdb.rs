@@ -33,6 +33,118 @@ fn duckdb_and_generic() -> TestedDialects {
 }
 
 #[test]
+fn test_struct() {
+    // s STRUCT(v VARCHAR, i INTEGER)
+    let struct_type1 = DataType::Struct(
+        vec![
+            StructField {
+                field_name: Some(Ident::new("v")),
+                field_type: DataType::Varchar(None),
+            },
+            StructField {
+                field_name: Some(Ident::new("i")),
+                field_type: DataType::Integer(None),
+            },
+        ],
+        StructBracketKind::Parentheses,
+    );
+
+    // basic struct
+    let statement = duckdb().verified_stmt(r#"CREATE TABLE t1 (s STRUCT(v VARCHAR, i INTEGER))"#);
+    assert_eq!(
+        column_defs(statement),
+        vec![ColumnDef {
+            name: "s".into(),
+            data_type: struct_type1.clone(),
+            collation: None,
+            options: vec![],
+        }]
+    );
+
+    // struct array
+    let statement = duckdb().verified_stmt(r#"CREATE TABLE t1 (s STRUCT(v VARCHAR, i INTEGER)[])"#);
+    assert_eq!(
+        column_defs(statement),
+        vec![ColumnDef {
+            name: "s".into(),
+            data_type: DataType::Array(ArrayElemTypeDef::SquareBracket(
+                Box::new(struct_type1),
+                None
+            )),
+            collation: None,
+            options: vec![],
+        }]
+    );
+
+    // s STRUCT(v VARCHAR, s STRUCT(a1 INTEGER, a2 VARCHAR))
+    let struct_type2 = DataType::Struct(
+        vec![
+            StructField {
+                field_name: Some(Ident::new("v")),
+                field_type: DataType::Varchar(None),
+            },
+            StructField {
+                field_name: Some(Ident::new("s")),
+                field_type: DataType::Struct(
+                    vec![
+                        StructField {
+                            field_name: Some(Ident::new("a1")),
+                            field_type: DataType::Integer(None),
+                        },
+                        StructField {
+                            field_name: Some(Ident::new("a2")),
+                            field_type: DataType::Varchar(None),
+                        },
+                    ],
+                    StructBracketKind::Parentheses,
+                ),
+            },
+        ],
+        StructBracketKind::Parentheses,
+    );
+
+    // nested struct
+    let statement = duckdb().verified_stmt(
+        r#"CREATE TABLE t1 (s STRUCT(v VARCHAR, s STRUCT(a1 INTEGER, a2 VARCHAR))[])"#,
+    );
+
+    assert_eq!(
+        column_defs(statement),
+        vec![ColumnDef {
+            name: "s".into(),
+            data_type: DataType::Array(ArrayElemTypeDef::SquareBracket(
+                Box::new(struct_type2),
+                None
+            )),
+            collation: None,
+            options: vec![],
+        }]
+    );
+
+    // failing test (duckdb does not support bracket syntax)
+    let sql_list = vec![
+        r#"CREATE TABLE t1 (s STRUCT(v VARCHAR, i INTEGER)))"#,
+        r#"CREATE TABLE t1 (s STRUCT(v VARCHAR, i INTEGER>)"#,
+        r#"CREATE TABLE t1 (s STRUCT<v VARCHAR, i INTEGER>)"#,
+        r#"CREATE TABLE t1 (s STRUCT v VARCHAR, i INTEGER )"#,
+        r#"CREATE TABLE t1 (s STRUCT VARCHAR, i INTEGER )"#,
+        r#"CREATE TABLE t1 (s STRUCT (VARCHAR, INTEGER))"#,
+    ];
+
+    for sql in sql_list {
+        duckdb().parse_sql_statements(sql).unwrap_err();
+    }
+}
+
+/// Returns the ColumnDefinitions from a CreateTable statement
+fn column_defs(statement: Statement) -> Vec<ColumnDef> {
+    match statement {
+        Statement::CreateTable(CreateTable { columns, .. }) => columns,
+        _ => panic!("Expected CreateTable"),
+    }
+}
+
+#[test]
 fn test_select_wildcard_with_exclude() {
     let select = duckdb().verified_only_select("SELECT * EXCLUDE (col_a) FROM data");
     let expected = SelectItem::Wildcard(WildcardAdditionalOptions {
@@ -166,19 +278,23 @@ fn test_select_union_by_name() {
                         with_hints: vec![],
                         version: None,
                         partitions: vec![],
+                        with_ordinality: false,
                     },
                     joins: vec![],
                 }],
                 lateral_views: vec![],
+                prewhere: None,
                 selection: None,
-                group_by: GroupByExpr::Expressions(vec![]),
+                group_by: GroupByExpr::Expressions(vec![], vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
+                window_before_qualify: false,
                 qualify: None,
                 value_table_mode: None,
+                connect_by: None,
             }))),
             right: Box::<SetExpr>::new(SetExpr::Select(Box::new(Select {
                 distinct: None,
@@ -202,19 +318,23 @@ fn test_select_union_by_name() {
                         with_hints: vec![],
                         version: None,
                         partitions: vec![],
+                        with_ordinality: false,
                     },
                     joins: vec![],
                 }],
                 lateral_views: vec![],
+                prewhere: None,
                 selection: None,
-                group_by: GroupByExpr::Expressions(vec![]),
+                group_by: GroupByExpr::Expressions(vec![], vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
+                window_before_qualify: false,
                 qualify: None,
                 value_table_mode: None,
+                connect_by: None,
             }))),
         });
         assert_eq!(ast.body, expected);
@@ -484,29 +604,207 @@ fn test_duckdb_named_argument_function_with_assignment_operator() {
     assert_eq!(
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::new("FUN")]),
-            args: vec![
-                FunctionArg::Named {
-                    name: Ident::new("a"),
-                    arg: FunctionArgExpr::Expr(Expr::Value(Value::SingleQuotedString(
-                        "1".to_owned()
-                    ))),
-                    operator: FunctionArgOperator::Assignment
-                },
-                FunctionArg::Named {
-                    name: Ident::new("b"),
-                    arg: FunctionArgExpr::Expr(Expr::Value(Value::SingleQuotedString(
-                        "2".to_owned()
-                    ))),
-                    operator: FunctionArgOperator::Assignment
-                },
-            ],
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    FunctionArg::Named {
+                        name: Ident::new("a"),
+                        arg: FunctionArgExpr::Expr(Expr::Value(Value::SingleQuotedString(
+                            "1".to_owned()
+                        ))),
+                        operator: FunctionArgOperator::Assignment
+                    },
+                    FunctionArg::Named {
+                        name: Ident::new("b"),
+                        arg: FunctionArgExpr::Expr(Expr::Value(Value::SingleQuotedString(
+                            "2".to_owned()
+                        ))),
+                        operator: FunctionArgOperator::Assignment
+                    },
+                ],
+                clauses: vec![],
+            }),
             null_treatment: None,
             filter: None,
             over: None,
-            distinct: false,
-            special: false,
-            order_by: vec![],
+            within_group: vec![],
         }),
         expr_from_projection(only(&select.projection))
+    );
+}
+
+#[test]
+fn test_array_index() {
+    let sql = r#"SELECT ['a', 'b', 'c'][3] AS three"#;
+    let select = duckdb().verified_only_select(sql);
+    let projection = &select.projection;
+    assert_eq!(1, projection.len());
+    let expr = match &projection[0] {
+        SelectItem::ExprWithAlias { expr, .. } => expr,
+        _ => panic!("Expected an expression with alias"),
+    };
+    assert_eq!(
+        &Expr::Subscript {
+            expr: Box::new(Expr::Array(Array {
+                elem: vec![
+                    Expr::Value(Value::SingleQuotedString("a".to_owned())),
+                    Expr::Value(Value::SingleQuotedString("b".to_owned())),
+                    Expr::Value(Value::SingleQuotedString("c".to_owned()))
+                ],
+                named: false
+            })),
+            subscript: Box::new(Subscript::Index {
+                index: Expr::Value(number("3"))
+            })
+        },
+        expr
+    );
+}
+
+#[test]
+fn test_duckdb_union_datatype() {
+    let sql = "CREATE TABLE tbl1 (one UNION(a INT), two UNION(a INT, b INT), nested UNION(a UNION(b INT)))";
+    let stmt = duckdb_and_generic().verified_stmt(sql);
+    assert_eq!(
+        Statement::CreateTable(CreateTable {
+            or_replace: Default::default(),
+            temporary: Default::default(),
+            external: Default::default(),
+            global: Default::default(),
+            if_not_exists: Default::default(),
+            transient: Default::default(),
+            volatile: Default::default(),
+            name: ObjectName(vec!["tbl1".into()]),
+            columns: vec![
+                ColumnDef {
+                    name: "one".into(),
+                    data_type: DataType::Union(vec![UnionField {
+                        field_name: "a".into(),
+                        field_type: DataType::Int(None)
+                    }]),
+                    collation: Default::default(),
+                    options: Default::default()
+                },
+                ColumnDef {
+                    name: "two".into(),
+                    data_type: DataType::Union(vec![
+                        UnionField {
+                            field_name: "a".into(),
+                            field_type: DataType::Int(None)
+                        },
+                        UnionField {
+                            field_name: "b".into(),
+                            field_type: DataType::Int(None)
+                        }
+                    ]),
+                    collation: Default::default(),
+                    options: Default::default()
+                },
+                ColumnDef {
+                    name: "nested".into(),
+                    data_type: DataType::Union(vec![UnionField {
+                        field_name: "a".into(),
+                        field_type: DataType::Union(vec![UnionField {
+                            field_name: "b".into(),
+                            field_type: DataType::Int(None)
+                        }])
+                    }]),
+                    collation: Default::default(),
+                    options: Default::default()
+                }
+            ],
+            constraints: Default::default(),
+            hive_distribution: HiveDistributionStyle::NONE,
+            hive_formats: Some(HiveFormat {
+                row_format: Default::default(),
+                serde_properties: Default::default(),
+                storage: Default::default(),
+                location: Default::default()
+            }),
+            table_properties: Default::default(),
+            with_options: Default::default(),
+            file_format: Default::default(),
+            location: Default::default(),
+            query: Default::default(),
+            without_rowid: Default::default(),
+            like: Default::default(),
+            clone: Default::default(),
+            engine: Default::default(),
+            comment: Default::default(),
+            auto_increment_offset: Default::default(),
+            default_charset: Default::default(),
+            collation: Default::default(),
+            on_commit: Default::default(),
+            on_cluster: Default::default(),
+            primary_key: Default::default(),
+            order_by: Default::default(),
+            partition_by: Default::default(),
+            cluster_by: Default::default(),
+            options: Default::default(),
+            strict: Default::default(),
+            copy_grants: Default::default(),
+            enable_schema_evolution: Default::default(),
+            change_tracking: Default::default(),
+            data_retention_time_in_days: Default::default(),
+            max_data_extension_time_in_days: Default::default(),
+            default_ddl_collation: Default::default(),
+            with_aggregation_policy: Default::default(),
+            with_row_access_policy: Default::default(),
+            with_tags: Default::default()
+        }),
+        stmt
+    );
+}
+
+#[test]
+fn parse_use() {
+    let valid_object_names = [
+        "mydb",
+        "SCHEMA",
+        "DATABASE",
+        "CATALOG",
+        "WAREHOUSE",
+        "DEFAULT",
+    ];
+    let quote_styles = ['"', '\''];
+
+    for object_name in &valid_object_names {
+        // Test single identifier without quotes
+        assert_eq!(
+            duckdb().verified_stmt(&format!("USE {}", object_name)),
+            Statement::Use(Use::Object(ObjectName(vec![Ident::new(
+                object_name.to_string()
+            )])))
+        );
+        for &quote in &quote_styles {
+            // Test single identifier with different type of quotes
+            assert_eq!(
+                duckdb().verified_stmt(&format!("USE {0}{1}{0}", quote, object_name)),
+                Statement::Use(Use::Object(ObjectName(vec![Ident::with_quote(
+                    quote,
+                    object_name.to_string(),
+                )])))
+            );
+        }
+    }
+
+    for &quote in &quote_styles {
+        // Test double identifier with different type of quotes
+        assert_eq!(
+            duckdb().verified_stmt(&format!("USE {0}CATALOG{0}.{0}my_schema{0}", quote)),
+            Statement::Use(Use::Object(ObjectName(vec![
+                Ident::with_quote(quote, "CATALOG"),
+                Ident::with_quote(quote, "my_schema")
+            ])))
+        );
+    }
+    // Test double identifier without quotes
+    assert_eq!(
+        duckdb().verified_stmt("USE mydb.my_schema"),
+        Statement::Use(Use::Object(ObjectName(vec![
+            Ident::new("mydb"),
+            Ident::new("my_schema")
+        ])))
     );
 }

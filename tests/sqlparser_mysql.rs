@@ -444,12 +444,35 @@ fn parse_show_collation() {
 
 #[test]
 fn parse_use() {
-    assert_eq!(
-        mysql_and_generic().verified_stmt("USE mydb"),
-        Statement::Use {
-            db_name: Ident::new("mydb")
+    let valid_object_names = [
+        "mydb",
+        "SCHEMA",
+        "DATABASE",
+        "CATALOG",
+        "WAREHOUSE",
+        "DEFAULT",
+    ];
+    let quote_styles = ['\'', '"', '`'];
+    for object_name in &valid_object_names {
+        // Test single identifier without quotes
+        assert_eq!(
+            mysql_and_generic().verified_stmt(&format!("USE {}", object_name)),
+            Statement::Use(Use::Object(ObjectName(vec![Ident::new(
+                object_name.to_string()
+            )])))
+        );
+        for &quote in &quote_styles {
+            // Test single identifier with different type of quotes
+            assert_eq!(
+                mysql_and_generic()
+                    .verified_stmt(&format!("USE {}{}{}", quote, object_name, quote)),
+                Statement::Use(Use::Object(ObjectName(vec![Ident::with_quote(
+                    quote,
+                    object_name.to_string(),
+                )])))
+            );
         }
-    );
+    }
 }
 
 #[test]
@@ -460,7 +483,7 @@ fn parse_set_variables() {
         Statement::SetVariable {
             local: true,
             hivevar: false,
-            variable: ObjectName(vec!["autocommit".into()]),
+            variables: OneOrManyWithParens::One(ObjectName(vec!["autocommit".into()])),
             value: vec![Expr::Value(number("1"))],
         }
     );
@@ -470,7 +493,7 @@ fn parse_set_variables() {
 fn parse_create_table_auto_increment() {
     let sql = "CREATE TABLE foo (bar INT PRIMARY KEY AUTO_INCREMENT)";
     match mysql().verified_stmt(sql) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(name.to_string(), "foo");
             assert_eq!(
                 vec![ColumnDef {
@@ -541,12 +564,12 @@ fn parse_create_table_primary_and_unique_key() {
 
     for (sql, index_type_display) in sqls.iter().zip(index_type_display) {
         match mysql().one_statement_parses_to(sql, "") {
-            Statement::CreateTable {
+            Statement::CreateTable(CreateTable {
                 name,
                 columns,
                 constraints,
                 ..
-            } => {
+            }) => {
                 assert_eq!(name.to_string(), "foo");
 
                 let expected_constraint = table_constraint_unique_primary_ctor(
@@ -609,9 +632,9 @@ fn parse_create_table_primary_and_unique_key_with_index_options() {
 
     for (sql, index_type_display) in sqls.iter().zip(index_type_display) {
         match mysql_and_generic().one_statement_parses_to(sql, "") {
-            Statement::CreateTable {
+            Statement::CreateTable(CreateTable {
                 name, constraints, ..
-            } => {
+            }) => {
                 assert_eq!(name.to_string(), "foo");
 
                 let expected_constraint = table_constraint_unique_primary_ctor(
@@ -647,9 +670,9 @@ fn parse_create_table_primary_and_unique_key_with_index_type() {
 
     for (sql, index_type_display) in sqls.iter().zip(index_type_display) {
         match mysql_and_generic().one_statement_parses_to(sql, "") {
-            Statement::CreateTable {
+            Statement::CreateTable(CreateTable {
                 name, constraints, ..
-            } => {
+            }) => {
                 assert_eq!(name.to_string(), "foo");
 
                 let expected_constraint = table_constraint_unique_primary_ctor(
@@ -690,7 +713,7 @@ fn parse_create_table_comment() {
 
     for sql in [canonical, with_equal] {
         match mysql().one_statement_parses_to(sql, canonical) {
-            Statement::CreateTable { name, comment, .. } => {
+            Statement::CreateTable(CreateTable { name, comment, .. }) => {
                 assert_eq!(name.to_string(), "foo");
                 assert_eq!(comment.expect("Should exist").to_string(), "baz");
             }
@@ -708,11 +731,11 @@ fn parse_create_table_auto_increment_offset() {
 
     for sql in [canonical, with_equal] {
         match mysql().one_statement_parses_to(sql, canonical) {
-            Statement::CreateTable {
+            Statement::CreateTable(CreateTable {
                 name,
                 auto_increment_offset,
                 ..
-            } => {
+            }) => {
                 assert_eq!(name.to_string(), "foo");
                 assert_eq!(
                     auto_increment_offset.expect("Should exist").to_string(),
@@ -728,7 +751,7 @@ fn parse_create_table_auto_increment_offset() {
 fn parse_create_table_set_enum() {
     let sql = "CREATE TABLE foo (bar SET('a', 'b'), baz ENUM('a', 'b'))";
     match mysql().verified_stmt(sql) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(name.to_string(), "foo");
             assert_eq!(
                 vec![
@@ -756,13 +779,13 @@ fn parse_create_table_set_enum() {
 fn parse_create_table_engine_default_charset() {
     let sql = "CREATE TABLE foo (id INT(11)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3";
     match mysql().verified_stmt(sql) {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             engine,
             default_charset,
             ..
-        } => {
+        }) => {
             assert_eq!(name.to_string(), "foo");
             assert_eq!(
                 vec![ColumnDef {
@@ -773,7 +796,13 @@ fn parse_create_table_engine_default_charset() {
                 },],
                 columns
             );
-            assert_eq!(engine, Some("InnoDB".to_string()));
+            assert_eq!(
+                engine,
+                Some(TableEngine {
+                    name: "InnoDB".to_string(),
+                    parameters: None
+                })
+            );
             assert_eq!(default_charset, Some("utf8mb3".to_string()));
         }
         _ => unreachable!(),
@@ -784,12 +813,12 @@ fn parse_create_table_engine_default_charset() {
 fn parse_create_table_collate() {
     let sql = "CREATE TABLE foo (id INT(11)) COLLATE=utf8mb4_0900_ai_ci";
     match mysql().verified_stmt(sql) {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             collation,
             ..
-        } => {
+        }) => {
             assert_eq!(name.to_string(), "foo");
             assert_eq!(
                 vec![ColumnDef {
@@ -807,10 +836,37 @@ fn parse_create_table_collate() {
 }
 
 #[test]
+fn parse_create_table_both_options_and_as_query() {
+    let sql = "CREATE TABLE foo (id INT(11)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb4_0900_ai_ci AS SELECT 1";
+    match mysql_and_generic().verified_stmt(sql) {
+        Statement::CreateTable(CreateTable {
+            name,
+            collation,
+            query,
+            ..
+        }) => {
+            assert_eq!(name.to_string(), "foo");
+            assert_eq!(collation, Some("utf8mb4_0900_ai_ci".to_string()));
+            assert_eq!(
+                query.unwrap().body.as_select().unwrap().projection,
+                vec![SelectItem::UnnamedExpr(Expr::Value(number("1")))]
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let sql = r"CREATE TABLE foo (id INT(11)) ENGINE=InnoDB AS SELECT 1 DEFAULT CHARSET=utf8mb3";
+    assert!(matches!(
+        mysql_and_generic().parse_sql_statements(sql),
+        Err(ParserError::ParserError(_))
+    ));
+}
+
+#[test]
 fn parse_create_table_comment_character_set() {
     let sql = "CREATE TABLE foo (s TEXT CHARACTER SET utf8mb4 COMMENT 'comment')";
     match mysql().verified_stmt(sql) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(name.to_string(), "foo");
             assert_eq!(
                 vec![ColumnDef {
@@ -857,7 +913,7 @@ fn parse_create_table_gencol() {
 fn parse_quote_identifiers() {
     let sql = "CREATE TABLE `PRIMARY` (`BEGIN` INT PRIMARY KEY)";
     match mysql().verified_stmt(sql) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(name.to_string(), "`PRIMARY`");
             assert_eq!(
                 vec![ColumnDef {
@@ -900,23 +956,28 @@ fn parse_escaped_quote_identifiers_with_escape() {
                 into: None,
                 from: vec![],
                 lateral_views: vec![],
+                prewhere: None,
                 selection: None,
-                group_by: GroupByExpr::Expressions(vec![]),
+                group_by: GroupByExpr::Expressions(vec![], vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
                 qualify: None,
+                window_before_qualify: false,
                 value_table_mode: None,
+                connect_by: None,
             }))),
-            order_by: vec![],
+            order_by: None,
             limit: None,
             limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
             for_clause: None,
+            settings: None,
+            format_clause: None,
         }))
     );
 }
@@ -945,23 +1006,28 @@ fn parse_escaped_quote_identifiers_with_no_escape() {
                 into: None,
                 from: vec![],
                 lateral_views: vec![],
+                prewhere: None,
                 selection: None,
-                group_by: GroupByExpr::Expressions(vec![]),
+                group_by: GroupByExpr::Expressions(vec![], vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
                 qualify: None,
+                window_before_qualify: false,
                 value_table_mode: None,
+                connect_by: None,
             }))),
-            order_by: vec![],
+            order_by: None,
             limit: None,
             limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
             for_clause: None,
+            settings: None,
+            format_clause: None,
         }))
     );
 }
@@ -987,23 +1053,28 @@ fn parse_escaped_backticks_with_escape() {
                 into: None,
                 from: vec![],
                 lateral_views: vec![],
+                prewhere: None,
                 selection: None,
-                group_by: GroupByExpr::Expressions(vec![]),
+                group_by: GroupByExpr::Expressions(vec![], vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
                 qualify: None,
+                window_before_qualify: false,
                 value_table_mode: None,
+                connect_by: None,
             }))),
-            order_by: vec![],
+            order_by: None,
             limit: None,
             limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
             for_clause: None,
+            settings: None,
+            format_clause: None,
         }))
     );
 }
@@ -1029,23 +1100,28 @@ fn parse_escaped_backticks_with_no_escape() {
                 into: None,
                 from: vec![],
                 lateral_views: vec![],
+                prewhere: None,
                 selection: None,
-                group_by: GroupByExpr::Expressions(vec![]),
+                group_by: GroupByExpr::Expressions(vec![], vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
                 qualify: None,
+                window_before_qualify: false,
                 value_table_mode: None,
+                connect_by: None,
             }))),
-            order_by: vec![],
+            order_by: None,
             limit: None,
             limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
             for_clause: None,
+            settings: None,
+            format_clause: None,
         }))
     );
 }
@@ -1118,7 +1194,7 @@ fn check_roundtrip_of_escaped_string() {
 fn parse_create_table_with_minimum_display_width() {
     let sql = "CREATE TABLE foo (bar_tinyint TINYINT(3), bar_smallint SMALLINT(5), bar_mediumint MEDIUMINT(6), bar_int INT(11), bar_bigint BIGINT(20))";
     match mysql().verified_stmt(sql) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(name.to_string(), "foo");
             assert_eq!(
                 vec![
@@ -1164,7 +1240,7 @@ fn parse_create_table_with_minimum_display_width() {
 fn parse_create_table_unsigned() {
     let sql = "CREATE TABLE foo (bar_tinyint TINYINT(3) UNSIGNED, bar_smallint SMALLINT(5) UNSIGNED, bar_mediumint MEDIUMINT(13) UNSIGNED, bar_int INT(11) UNSIGNED, bar_bigint BIGINT(20) UNSIGNED)";
     match mysql().verified_stmt(sql) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(name.to_string(), "foo");
             assert_eq!(
                 vec![
@@ -1243,13 +1319,15 @@ fn parse_simple_insert() {
                             ]
                         ]
                     })),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 })),
                 source
             );
@@ -1285,13 +1363,15 @@ fn parse_ignore_insert() {
                             Expr::Value(number("1"))
                         ]]
                     })),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 })),
                 source
             );
@@ -1327,13 +1407,15 @@ fn parse_priority_insert() {
                             Expr::Value(number("1"))
                         ]]
                     })),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 })),
                 source
             );
@@ -1366,13 +1448,15 @@ fn parse_priority_insert() {
                             Expr::Value(number("1"))
                         ]]
                     })),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 })),
                 source
             );
@@ -1413,13 +1497,15 @@ fn parse_insert_as() {
                             "2024-01-01".to_string()
                         ))]]
                     })),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 })),
                 source
             );
@@ -1472,13 +1558,15 @@ fn parse_insert_as() {
                             Expr::Value(Value::SingleQuotedString("2024-01-01".to_string()))
                         ]]
                     })),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 })),
                 source
             );
@@ -1515,13 +1603,15 @@ fn parse_replace_insert() {
                             Expr::Value(number("1"))
                         ]]
                     })),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 })),
                 source
             );
@@ -1552,13 +1642,15 @@ fn parse_empty_row_insert() {
                         explicit_row: false,
                         rows: vec![vec![], vec![]]
                     })),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 })),
                 source
             );
@@ -1612,92 +1704,49 @@ fn parse_insert_with_on_duplicate_update() {
                             Expr::Value(Value::Boolean(true)),
                         ]]
                     })),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 })),
                 source
             );
             assert_eq!(
                 Some(OnInsert::DuplicateKeyUpdate(vec![
                     Assignment {
-                        id: vec![Ident::new("description".to_string())],
-                        value: Expr::Function(Function {
-                            name: ObjectName(vec![Ident::new("VALUES".to_string()),]),
-                            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
-                                Expr::Identifier(Ident::new("description"))
-                            ))],
-                            null_treatment: None,
-                            filter: None,
-                            over: None,
-                            distinct: false,
-                            special: false,
-                            order_by: vec![],
-                        })
+                        target: AssignmentTarget::ColumnName(ObjectName(vec![Ident::new(
+                            "description".to_string()
+                        )])),
+                        value: call("VALUES", [Expr::Identifier(Ident::new("description"))]),
                     },
                     Assignment {
-                        id: vec![Ident::new("perm_create".to_string())],
-                        value: Expr::Function(Function {
-                            name: ObjectName(vec![Ident::new("VALUES".to_string()),]),
-                            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
-                                Expr::Identifier(Ident::new("perm_create"))
-                            ))],
-                            null_treatment: None,
-                            filter: None,
-                            over: None,
-                            distinct: false,
-                            special: false,
-                            order_by: vec![],
-                        })
+                        target: AssignmentTarget::ColumnName(ObjectName(vec![Ident::new(
+                            "perm_create".to_string()
+                        )])),
+                        value: call("VALUES", [Expr::Identifier(Ident::new("perm_create"))]),
                     },
                     Assignment {
-                        id: vec![Ident::new("perm_read".to_string())],
-                        value: Expr::Function(Function {
-                            name: ObjectName(vec![Ident::new("VALUES".to_string()),]),
-                            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
-                                Expr::Identifier(Ident::new("perm_read"))
-                            ))],
-                            null_treatment: None,
-                            filter: None,
-                            over: None,
-                            distinct: false,
-                            special: false,
-                            order_by: vec![],
-                        })
+                        target: AssignmentTarget::ColumnName(ObjectName(vec![Ident::new(
+                            "perm_read".to_string()
+                        )])),
+                        value: call("VALUES", [Expr::Identifier(Ident::new("perm_read"))]),
                     },
                     Assignment {
-                        id: vec![Ident::new("perm_update".to_string())],
-                        value: Expr::Function(Function {
-                            name: ObjectName(vec![Ident::new("VALUES".to_string()),]),
-                            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
-                                Expr::Identifier(Ident::new("perm_update"))
-                            ))],
-                            null_treatment: None,
-                            filter: None,
-                            over: None,
-                            distinct: false,
-                            special: false,
-                            order_by: vec![],
-                        })
+                        target: AssignmentTarget::ColumnName(ObjectName(vec![Ident::new(
+                            "perm_update".to_string()
+                        )])),
+                        value: call("VALUES", [Expr::Identifier(Ident::new("perm_update"))]),
                     },
                     Assignment {
-                        id: vec![Ident::new("perm_delete".to_string())],
-                        value: Expr::Function(Function {
-                            name: ObjectName(vec![Ident::new("VALUES".to_string()),]),
-                            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
-                                Expr::Identifier(Ident::new("perm_delete"))
-                            ))],
-                            null_treatment: None,
-                            filter: None,
-                            over: None,
-                            distinct: false,
-                            special: false,
-                            order_by: vec![],
-                        })
+                        target: AssignmentTarget::ColumnName(ObjectName(vec![Ident::new(
+                            "perm_delete".to_string()
+                        )])),
+                        value: call("VALUES", [Expr::Identifier(Ident::new("perm_delete"))]),
                     },
                 ])),
                 on
@@ -1729,19 +1778,23 @@ fn parse_select_with_numeric_prefix_column_name() {
                             with_hints: vec![],
                             version: None,
                             partitions: vec![],
+                            with_ordinality: false,
                         },
                         joins: vec![]
                     }],
                     lateral_views: vec![],
+                    prewhere: None,
                     selection: None,
-                    group_by: GroupByExpr::Expressions(vec![]),
+                    group_by: GroupByExpr::Expressions(vec![], vec![]),
                     cluster_by: vec![],
                     distribute_by: vec![],
                     sort_by: vec![],
                     having: None,
                     named_window: vec![],
                     qualify: None,
+                    window_before_qualify: false,
                     value_table_mode: None,
+                    connect_by: None,
                 })))
             );
         }
@@ -1780,19 +1833,23 @@ fn parse_select_with_concatenation_of_exp_number_and_numeric_prefix_column() {
                             with_hints: vec![],
                             version: None,
                             partitions: vec![],
+                            with_ordinality: false,
                         },
                         joins: vec![]
                     }],
                     lateral_views: vec![],
+                    prewhere: None,
                     selection: None,
-                    group_by: GroupByExpr::Expressions(vec![]),
+                    group_by: GroupByExpr::Expressions(vec![], vec![]),
                     cluster_by: vec![],
                     distribute_by: vec![],
                     sort_by: vec![],
                     having: None,
                     named_window: vec![],
                     qualify: None,
+                    window_before_qualify: false,
                     value_table_mode: None,
+                    connect_by: None,
                 })))
             );
         }
@@ -1842,6 +1899,7 @@ fn parse_update_with_joins() {
                         with_hints: vec![],
                         version: None,
                         partitions: vec![],
+                        with_ordinality: false,
                     },
                     joins: vec![Join {
                         relation: TableFactor::Table {
@@ -1854,7 +1912,9 @@ fn parse_update_with_joins() {
                             with_hints: vec![],
                             version: None,
                             partitions: vec![],
+                            with_ordinality: false,
                         },
+                        global: false,
                         join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
                             left: Box::new(Expr::CompoundIdentifier(vec![
                                 Ident::new("o"),
@@ -1872,7 +1932,10 @@ fn parse_update_with_joins() {
             );
             assert_eq!(
                 vec![Assignment {
-                    id: vec![Ident::new("o"), Ident::new("completed")],
+                    target: AssignmentTarget::ColumnName(ObjectName(vec![
+                        Ident::new("o"),
+                        Ident::new("completed")
+                    ])),
                     value: Expr::Value(Value::Boolean(true))
                 }],
                 assignments
@@ -1907,6 +1970,7 @@ fn parse_delete_with_order_by() {
                     }),
                     asc: Some(false),
                     nulls_first: None,
+                    with_fill: None,
                 }],
                 order_by
             );
@@ -1935,6 +1999,7 @@ fn parse_alter_table_add_column() {
             only,
             operations,
             location: _,
+            on_cluster: _,
         } => {
             assert_eq!(name.to_string(), "tab");
             assert!(!if_exists);
@@ -1964,6 +2029,7 @@ fn parse_alter_table_add_column() {
             only,
             operations,
             location: _,
+            on_cluster: _,
         } => {
             assert_eq!(name.to_string(), "tab");
             assert!(!if_exists);
@@ -2001,6 +2067,7 @@ fn parse_alter_table_add_columns() {
             only,
             operations,
             location: _,
+            on_cluster: _,
         } => {
             assert_eq!(name.to_string(), "tab");
             assert!(!if_exists);
@@ -2274,27 +2341,33 @@ fn parse_substring_in_select() {
                                 with_hints: vec![],
                                 version: None,
                                 partitions: vec![],
+                                with_ordinality: false,
                             },
                             joins: vec![]
                         }],
                         lateral_views: vec![],
+                        prewhere: None,
                         selection: None,
-                        group_by: GroupByExpr::Expressions(vec![]),
+                        group_by: GroupByExpr::Expressions(vec![], vec![]),
                         cluster_by: vec![],
                         distribute_by: vec![],
                         sort_by: vec![],
                         having: None,
                         named_window: vec![],
+                        window_before_qualify: false,
                         qualify: None,
                         value_table_mode: None,
+                        connect_by: None,
                     }))),
-                    order_by: vec![],
+                    order_by: None,
                     limit: None,
                     limit_by: vec![],
                     offset: None,
                     fetch: None,
                     locks: vec![],
                     for_clause: None,
+                    settings: None,
+                    format_clause: None,
                 }),
                 query
             );
@@ -2362,7 +2435,7 @@ fn parse_kill() {
 fn parse_table_colum_option_on_update() {
     let sql1 = "CREATE TABLE foo (`modification_time` DATETIME ON UPDATE CURRENT_TIMESTAMP())";
     match mysql().verified_stmt(sql1) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(name.to_string(), "foo");
             assert_eq!(
                 vec![ColumnDef {
@@ -2371,16 +2444,7 @@ fn parse_table_colum_option_on_update() {
                     collation: None,
                     options: vec![ColumnOptionDef {
                         name: None,
-                        option: ColumnOption::OnUpdate(Expr::Function(Function {
-                            name: ObjectName(vec![Ident::new("CURRENT_TIMESTAMP")]),
-                            args: vec![],
-                            null_treatment: None,
-                            filter: None,
-                            over: None,
-                            distinct: false,
-                            special: false,
-                            order_by: vec![],
-                        })),
+                        option: ColumnOption::OnUpdate(call("CURRENT_TIMESTAMP", [])),
                     },],
                 }],
                 columns
@@ -2549,7 +2613,7 @@ fn parse_fulltext_expression() {
 }
 
 #[test]
-#[should_panic = "Expected FULLTEXT or SPATIAL option without constraint name, found: cons"]
+#[should_panic = "Expected: FULLTEXT or SPATIAL option without constraint name, found: cons"]
 fn parse_create_table_with_fulltext_definition_should_not_accept_constraint_name() {
     mysql_and_generic().verified_stmt("CREATE TABLE tb (c1 INT, CONSTRAINT cons FULLTEXT (c1))");
 }
@@ -2589,24 +2653,29 @@ fn parse_hex_string_introducer() {
                 })],
                 from: vec![],
                 lateral_views: vec![],
+                prewhere: None,
                 selection: None,
-                group_by: GroupByExpr::Expressions(vec![]),
+                group_by: GroupByExpr::Expressions(vec![], vec![]),
                 cluster_by: vec![],
                 distribute_by: vec![],
                 sort_by: vec![],
                 having: None,
                 named_window: vec![],
+                window_before_qualify: false,
                 qualify: None,
                 value_table_mode: None,
-                into: None
+                into: None,
+                connect_by: None,
             }))),
-            order_by: vec![],
+            order_by: None,
             limit: None,
             limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
             for_clause: None,
+            settings: None,
+            format_clause: None,
         }))
     )
 }
@@ -2670,7 +2739,7 @@ fn parse_create_table_with_column_collate() {
     let sql = "CREATE TABLE tb (id TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci)";
     let canonical = "CREATE TABLE tb (id TEXT COLLATE utf8mb4_0900_ai_ci CHARACTER SET utf8mb4)";
     match mysql().one_statement_parses_to(sql, canonical) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(name.to_string(), "tb");
             assert_eq!(
                 vec![ColumnDef {
@@ -2753,4 +2822,15 @@ fn parse_json_table() {
             }),
         }
     );
+}
+
+#[test]
+fn test_group_concat() {
+    // examples taken from mysql docs
+    // https://dev.mysql.com/doc/refman/8.0/en/aggregate-functions.html#function_group-concat
+    mysql_and_generic().verified_expr("GROUP_CONCAT(DISTINCT test_score)");
+    mysql_and_generic().verified_expr("GROUP_CONCAT(test_score ORDER BY test_score)");
+    mysql_and_generic().verified_expr("GROUP_CONCAT(test_score SEPARATOR ' ')");
+    mysql_and_generic()
+        .verified_expr("GROUP_CONCAT(DISTINCT test_score ORDER BY test_score DESC SEPARATOR ' ')");
 }

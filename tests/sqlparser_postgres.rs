@@ -317,7 +317,7 @@ fn parse_create_table_with_defaults() {
             active int NOT NULL
     ) WITH (fillfactor = 20, user_catalog_table = true, autovacuum_vacuum_threshold = 100)";
     match pg_and_generic().one_statement_parses_to(sql, "") {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
@@ -327,7 +327,7 @@ fn parse_create_table_with_defaults() {
             file_format: None,
             location: None,
             ..
-        } => {
+        }) => {
             use pretty_assertions::assert_eq;
             assert_eq!("public.customer", name.to_string());
             assert_eq!(
@@ -537,12 +537,12 @@ fn parse_create_table_constraints_only() {
     let sql = "CREATE TABLE t (CONSTRAINT positive CHECK (2 > 1))";
     let ast = pg_and_generic().verified_stmt(sql);
     match ast {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
             ..
-        } => {
+        }) => {
             assert_eq!("t", name.to_string());
             assert!(columns.is_empty());
             assert_eq!(
@@ -648,7 +648,7 @@ fn parse_alter_table_alter_column_add_generated() {
         "ALTER TABLE t ALTER COLUMN id ADD GENERATED ( INCREMENT 1 MINVALUE 1 )",
     );
     assert_eq!(
-        ParserError::ParserError("Expected AS, found: (".to_string()),
+        ParserError::ParserError("Expected: AS, found: (".to_string()),
         res.unwrap_err()
     );
 
@@ -656,14 +656,14 @@ fn parse_alter_table_alter_column_add_generated() {
         "ALTER TABLE t ALTER COLUMN id ADD GENERATED AS IDENTITY ( INCREMENT )",
     );
     assert_eq!(
-        ParserError::ParserError("Expected a value, found: )".to_string()),
+        ParserError::ParserError("Expected: a value, found: )".to_string()),
         res.unwrap_err()
     );
 
     let res =
         pg().parse_sql_statements("ALTER TABLE t ALTER COLUMN id ADD GENERATED AS IDENTITY (");
     assert_eq!(
-        ParserError::ParserError("Expected ), found: EOF".to_string()),
+        ParserError::ParserError("Expected: ), found: EOF".to_string()),
         res.unwrap_err()
     );
 }
@@ -677,6 +677,7 @@ fn parse_alter_table_add_columns() {
             only,
             operations,
             location: _,
+            on_cluster: _,
         } => {
             assert_eq!(name.to_string(), "tab");
             assert!(if_exists);
@@ -714,15 +715,88 @@ fn parse_alter_table_add_columns() {
 }
 
 #[test]
+fn parse_alter_table_owner_to() {
+    struct TestCase {
+        sql: &'static str,
+        expected_owner: Owner,
+    }
+
+    let test_cases = vec![
+        TestCase {
+            sql: "ALTER TABLE tab OWNER TO new_owner",
+            expected_owner: Owner::Ident(Ident::new("new_owner".to_string())),
+        },
+        TestCase {
+            sql: "ALTER TABLE tab OWNER TO postgres",
+            expected_owner: Owner::Ident(Ident::new("postgres".to_string())),
+        },
+        TestCase {
+            sql: "ALTER TABLE tab OWNER TO CREATE", // treats CREATE as an identifier
+            expected_owner: Owner::Ident(Ident::new("CREATE".to_string())),
+        },
+        TestCase {
+            sql: "ALTER TABLE tab OWNER TO \"new_owner\"",
+            expected_owner: Owner::Ident(Ident::with_quote('\"', "new_owner".to_string())),
+        },
+        TestCase {
+            sql: "ALTER TABLE tab OWNER TO CURRENT_USER",
+            expected_owner: Owner::CurrentUser,
+        },
+        TestCase {
+            sql: "ALTER TABLE tab OWNER TO CURRENT_ROLE",
+            expected_owner: Owner::CurrentRole,
+        },
+        TestCase {
+            sql: "ALTER TABLE tab OWNER TO SESSION_USER",
+            expected_owner: Owner::SessionUser,
+        },
+    ];
+
+    for case in test_cases {
+        match pg_and_generic().verified_stmt(case.sql) {
+            Statement::AlterTable {
+                name,
+                if_exists: _,
+                only: _,
+                operations,
+                location: _,
+                on_cluster: _,
+            } => {
+                assert_eq!(name.to_string(), "tab");
+                assert_eq!(
+                    operations,
+                    vec![AlterTableOperation::OwnerTo {
+                        new_owner: case.expected_owner.clone()
+                    }]
+                );
+            }
+            _ => unreachable!("Expected an AlterTable statement"),
+        }
+    }
+
+    let res = pg().parse_sql_statements("ALTER TABLE tab OWNER TO CREATE FOO");
+    assert_eq!(
+        ParserError::ParserError("Expected: end of statement, found: FOO".to_string()),
+        res.unwrap_err()
+    );
+
+    let res = pg().parse_sql_statements("ALTER TABLE tab OWNER TO 4");
+    assert_eq!(
+        ParserError::ParserError("Expected: CURRENT_USER, CURRENT_ROLE, SESSION_USER or identifier after OWNER TO. sql parser error: Expected: identifier, found: 4".to_string()),
+        res.unwrap_err()
+    );
+}
+
+#[test]
 fn parse_create_table_if_not_exists() {
     let sql = "CREATE TABLE IF NOT EXISTS uk_cities ()";
     let ast = pg_and_generic().verified_stmt(sql);
     match ast {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             if_not_exists: true,
             ..
-        } => {
+        }) => {
             assert_eq!("uk_cities", name.to_string());
         }
         _ => unreachable!(),
@@ -733,25 +807,25 @@ fn parse_create_table_if_not_exists() {
 fn parse_bad_if_not_exists() {
     let res = pg().parse_sql_statements("CREATE TABLE NOT EXISTS uk_cities ()");
     assert_eq!(
-        ParserError::ParserError("Expected end of statement, found: EXISTS".to_string()),
+        ParserError::ParserError("Expected: end of statement, found: EXISTS".to_string()),
         res.unwrap_err()
     );
 
     let res = pg().parse_sql_statements("CREATE TABLE IF EXISTS uk_cities ()");
     assert_eq!(
-        ParserError::ParserError("Expected end of statement, found: EXISTS".to_string()),
+        ParserError::ParserError("Expected: end of statement, found: EXISTS".to_string()),
         res.unwrap_err()
     );
 
     let res = pg().parse_sql_statements("CREATE TABLE IF uk_cities ()");
     assert_eq!(
-        ParserError::ParserError("Expected end of statement, found: uk_cities".to_string()),
+        ParserError::ParserError("Expected: end of statement, found: uk_cities".to_string()),
         res.unwrap_err()
     );
 
     let res = pg().parse_sql_statements("CREATE TABLE IF NOT uk_cities ()");
     assert_eq!(
-        ParserError::ParserError("Expected end of statement, found: NOT".to_string()),
+        ParserError::ParserError("Expected: end of statement, found: NOT".to_string()),
         res.unwrap_err()
     );
 }
@@ -1074,23 +1148,28 @@ fn parse_copy_to() {
                     into: None,
                     from: vec![],
                     lateral_views: vec![],
+                    prewhere: None,
                     selection: None,
-                    group_by: GroupByExpr::Expressions(vec![]),
+                    group_by: GroupByExpr::Expressions(vec![], vec![]),
                     having: None,
                     named_window: vec![],
+                    window_before_qualify: false,
                     cluster_by: vec![],
                     distribute_by: vec![],
                     sort_by: vec![],
                     qualify: None,
                     value_table_mode: None,
+                    connect_by: None,
                 }))),
-                order_by: vec![],
+                order_by: None,
                 limit: None,
                 limit_by: vec![],
                 offset: None,
                 fetch: None,
                 locks: vec![],
                 for_clause: None,
+                settings: None,
+                format_clause: None,
             })),
             to: true,
             target: CopyTarget::File {
@@ -1199,7 +1278,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Identifier(Ident {
                 value: "b".into(),
                 quote_style: None
@@ -1213,7 +1292,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Value(Value::SingleQuotedString("b".into()))],
         }
     );
@@ -1224,7 +1303,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Value(number("0"))],
         }
     );
@@ -1235,7 +1314,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Identifier(Ident {
                 value: "DEFAULT".into(),
                 quote_style: None
@@ -1249,7 +1328,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: true,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Identifier("b".into())],
         }
     );
@@ -1260,7 +1339,11 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a"), Ident::new("b"), Ident::new("c")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![
+                Ident::new("a"),
+                Ident::new("b"),
+                Ident::new("c")
+            ])),
             value: vec![Expr::Identifier(Ident {
                 value: "b".into(),
                 quote_style: None
@@ -1277,13 +1360,13 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![
+            variables: OneOrManyWithParens::One(ObjectName(vec![
                 Ident::new("hive"),
                 Ident::new("tez"),
                 Ident::new("auto"),
                 Ident::new("reducer"),
                 Ident::new("parallelism")
-            ]),
+            ])),
             value: vec![Expr::Value(Value::Boolean(false))],
         }
     );
@@ -1294,21 +1377,21 @@ fn parse_set() {
     assert_eq!(
         pg_and_generic().parse_sql_statements("SET"),
         Err(ParserError::ParserError(
-            "Expected identifier, found: EOF".to_string()
+            "Expected: identifier, found: EOF".to_string()
         )),
     );
 
     assert_eq!(
         pg_and_generic().parse_sql_statements("SET a b"),
         Err(ParserError::ParserError(
-            "Expected equals sign or TO, found: b".to_string()
+            "Expected: equals sign or TO, found: b".to_string()
         )),
     );
 
     assert_eq!(
         pg_and_generic().parse_sql_statements("SET a ="),
         Err(ParserError::ParserError(
-            "Expected variable value, found: EOF".to_string()
+            "Expected: variable value, found: EOF".to_string()
         )),
     );
 }
@@ -1551,7 +1634,7 @@ fn parse_pg_on_conflict() {
             assert_eq!(
                 OnConflictAction::DoUpdate(DoUpdate {
                     assignments: vec![Assignment {
-                        id: vec!["dname".into()],
+                        target: AssignmentTarget::ColumnName(ObjectName(vec!["dname".into()])),
                         value: Expr::CompoundIdentifier(vec!["EXCLUDED".into(), "dname".into()])
                     },],
                     selection: None
@@ -1582,14 +1665,14 @@ fn parse_pg_on_conflict() {
                 OnConflictAction::DoUpdate(DoUpdate {
                     assignments: vec![
                         Assignment {
-                            id: vec!["dname".into()],
+                            target: AssignmentTarget::ColumnName(ObjectName(vec!["dname".into()])),
                             value: Expr::CompoundIdentifier(vec![
                                 "EXCLUDED".into(),
                                 "dname".into()
                             ])
                         },
                         Assignment {
-                            id: vec!["area".into()],
+                            target: AssignmentTarget::ColumnName(ObjectName(vec!["area".into()])),
                             value: Expr::CompoundIdentifier(vec!["EXCLUDED".into(), "area".into()])
                         },
                     ],
@@ -1639,7 +1722,7 @@ fn parse_pg_on_conflict() {
             assert_eq!(
                 OnConflictAction::DoUpdate(DoUpdate {
                     assignments: vec![Assignment {
-                        id: vec!["dname".into()],
+                        target: AssignmentTarget::ColumnName(ObjectName(vec!["dname".into()])),
                         value: Expr::Value(Value::Placeholder("$1".to_string()))
                     },],
                     selection: Some(Expr::BinaryOp {
@@ -1676,7 +1759,7 @@ fn parse_pg_on_conflict() {
             assert_eq!(
                 OnConflictAction::DoUpdate(DoUpdate {
                     assignments: vec![Assignment {
-                        id: vec!["dname".into()],
+                        target: AssignmentTarget::ColumnName(ObjectName(vec!["dname".into()])),
                         value: Expr::Value(Value::Placeholder("$1".to_string()))
                     },],
                     selection: Some(Expr::BinaryOp {
@@ -1751,6 +1834,29 @@ fn parse_pg_returning() {
     };
 }
 
+fn test_operator(operator: &str, dialect: &TestedDialects, expected: BinaryOperator) {
+    let operator_tokens =
+        sqlparser::tokenizer::Tokenizer::new(&PostgreSqlDialect {}, &format!("a{operator}b"))
+            .tokenize()
+            .unwrap();
+    assert_eq!(
+        operator_tokens.len(),
+        3,
+        "binary op should be 3 tokens, not {operator_tokens:?}"
+    );
+    let expected_expr = Expr::BinaryOp {
+        left: Box::new(Expr::Identifier(Ident::new("a"))),
+        op: expected,
+        right: Box::new(Expr::Identifier(Ident::new("b"))),
+    };
+    let str_expr_canonical = format!("a {operator} b");
+    assert_eq!(expected_expr, dialect.verified_expr(&str_expr_canonical));
+    assert_eq!(
+        expected_expr,
+        dialect.expr_parses_to(&format!("a{operator}b"), &str_expr_canonical)
+    );
+}
+
 #[test]
 fn parse_pg_binary_ops() {
     let binary_ops = &[
@@ -1764,16 +1870,71 @@ fn parse_pg_binary_ops() {
     ];
 
     for (str_op, op, dialects) in binary_ops {
-        let select = dialects.verified_only_select(&format!("SELECT a {} b", &str_op));
-        assert_eq!(
-            SelectItem::UnnamedExpr(Expr::BinaryOp {
-                left: Box::new(Expr::Identifier(Ident::new("a"))),
-                op: op.clone(),
-                right: Box::new(Expr::Identifier(Ident::new("b"))),
-            }),
-            select.projection[0]
-        );
+        test_operator(str_op, dialects, op.clone());
     }
+}
+
+#[test]
+fn parse_pg_custom_binary_ops() {
+    // Postgres supports declaring custom binary operators, using any character in the following set:
+    //  + - * / < > = ~ ! @ # % ^ & | ` ?
+
+    // Here, we test the ones used by common extensions
+    let operators = [
+        // PostGIS
+        "&&&",   // n-D bounding boxes intersect
+        "&<",    // (is strictly to the left of)
+        "&>",    // (is strictly to the right of)
+        "|=|",   //  distance between A and B trajectories at their closest point of approach
+        "<<#>>", // n-D distance between A and B bounding boxes
+        "|>>",   // A's bounding box is strictly above B's.
+        "~=",    // bounding box is the same
+        // PGroonga
+        "&@",   // Full text search by a keyword
+        "&@~",  // Full text search by easy to use query language
+        "&@*",  // Similar search
+        "&`",   // Advanced search by ECMAScript like query language
+        "&@|",  // Full text search by an array of keywords
+        "&@~|", //  Full text search by an array of queries in easy to use query language
+        // pgtrgm
+        "<<%", // second argument has a continuous extent of an ordered trigram set that matches word boundaries
+        "%>>", // commutator of <<%
+        "<<<->", // distance between arguments
+        // hstore
+        "#=", // Replace fields with matching values from hstore
+        // ranges
+        "-|-", // Is adjacent to
+        // pg_similarity
+        "~++", // L1 distance
+        "~##", // Cosine Distance
+        "~-~", // Dice Coefficient
+        "~!!", // Euclidean Distance
+        "~@~", // Hamming Distance
+        "~??", // Jaccard Coefficient
+        "~%%", // Jaro Distance
+        "~@@", // Jaro-Winkler Distance
+        "~==", // Levenshtein Distance
+        "~^^", // Matching Coefficient
+        "~||", // Monge-Elkan Coefficient
+        "~#~", // Needleman-Wunsch Coefficient
+        "~**", // Overlap Coefficient
+        "~~~", // Q-Gram Distance
+        "~=~", // Smith-Waterman Coefficient
+        "~!~", // Smith-Waterman-Gotoh Coefficient
+        "~*~", // Soundex Distance
+        // soundex_operator
+        ">@@<", // Soundex matches
+        "<@@>", // Soundex doesn't match
+    ];
+    for op in &operators {
+        test_operator(op, &pg(), BinaryOperator::Custom(op.to_string()));
+    }
+}
+
+#[test]
+fn parse_ampersand_arobase() {
+    // In SQL Server, a&@b means (a) & (@b), in PostgreSQL it means (a) &@ (b)
+    pg().expr_parses_to("a&@b", "a &@ b");
 }
 
 #[test]
@@ -1867,9 +2028,11 @@ fn parse_array_index_expr() {
     let sql = "SELECT foo[0] FROM foos";
     let select = pg_and_generic().verified_only_select(sql);
     assert_eq!(
-        &Expr::ArrayIndex {
-            obj: Box::new(Expr::Identifier(Ident::new("foo"))),
-            indexes: vec![num[0].clone()],
+        &Expr::Subscript {
+            expr: Box::new(Expr::Identifier(Ident::new("foo"))),
+            subscript: Box::new(Subscript::Index {
+                index: num[0].clone()
+            }),
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -1877,9 +2040,16 @@ fn parse_array_index_expr() {
     let sql = "SELECT foo[0][0] FROM foos";
     let select = pg_and_generic().verified_only_select(sql);
     assert_eq!(
-        &Expr::ArrayIndex {
-            obj: Box::new(Expr::Identifier(Ident::new("foo"))),
-            indexes: vec![num[0].clone(), num[0].clone()],
+        &Expr::Subscript {
+            expr: Box::new(Expr::Subscript {
+                expr: Box::new(Expr::Identifier(Ident::new("foo"))),
+                subscript: Box::new(Subscript::Index {
+                    index: num[0].clone()
+                }),
+            }),
+            subscript: Box::new(Subscript::Index {
+                index: num[0].clone()
+            }),
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -1887,19 +2057,27 @@ fn parse_array_index_expr() {
     let sql = r#"SELECT bar[0]["baz"]["fooz"] FROM foos"#;
     let select = pg_and_generic().verified_only_select(sql);
     assert_eq!(
-        &Expr::ArrayIndex {
-            obj: Box::new(Expr::Identifier(Ident::new("bar"))),
-            indexes: vec![
-                num[0].clone(),
-                Expr::Identifier(Ident {
-                    value: "baz".to_string(),
-                    quote_style: Some('"')
+        &Expr::Subscript {
+            expr: Box::new(Expr::Subscript {
+                expr: Box::new(Expr::Subscript {
+                    expr: Box::new(Expr::Identifier(Ident::new("bar"))),
+                    subscript: Box::new(Subscript::Index {
+                        index: num[0].clone()
+                    })
                 }),
-                Expr::Identifier(Ident {
+                subscript: Box::new(Subscript::Index {
+                    index: Expr::Identifier(Ident {
+                        value: "baz".to_string(),
+                        quote_style: Some('"')
+                    })
+                })
+            }),
+            subscript: Box::new(Subscript::Index {
+                index: Expr::Identifier(Ident {
                     value: "fooz".to_string(),
                     quote_style: Some('"')
                 })
-            ],
+            })
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -1907,24 +2085,33 @@ fn parse_array_index_expr() {
     let sql = "SELECT (CAST(ARRAY[ARRAY[2, 3]] AS INT[][]))[1][2]";
     let select = pg_and_generic().verified_only_select(sql);
     assert_eq!(
-        &Expr::ArrayIndex {
-            obj: Box::new(Expr::Nested(Box::new(Expr::Cast {
-                kind: CastKind::Cast,
-                expr: Box::new(Expr::Array(Array {
-                    elem: vec![Expr::Array(Array {
-                        elem: vec![num[2].clone(), num[3].clone(),],
+        &Expr::Subscript {
+            expr: Box::new(Expr::Subscript {
+                expr: Box::new(Expr::Nested(Box::new(Expr::Cast {
+                    kind: CastKind::Cast,
+                    expr: Box::new(Expr::Array(Array {
+                        elem: vec![Expr::Array(Array {
+                            elem: vec![num[2].clone(), num[3].clone(),],
+                            named: true,
+                        })],
                         named: true,
-                    })],
-                    named: true,
-                })),
-                data_type: DataType::Array(ArrayElemTypeDef::SquareBracket(Box::new(
-                    DataType::Array(ArrayElemTypeDef::SquareBracket(Box::new(DataType::Int(
+                    })),
+                    data_type: DataType::Array(ArrayElemTypeDef::SquareBracket(
+                        Box::new(DataType::Array(ArrayElemTypeDef::SquareBracket(
+                            Box::new(DataType::Int(None)),
+                            None
+                        ))),
                         None
-                    ))))
-                ))),
-                format: None,
-            }))),
-            indexes: vec![num[1].clone(), num[2].clone()],
+                    )),
+                    format: None,
+                }))),
+                subscript: Box::new(Subscript::Index {
+                    index: num[1].clone()
+                }),
+            }),
+            subscript: Box::new(Subscript::Index {
+                index: num[2].clone()
+            }),
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -1941,10 +2128,120 @@ fn parse_array_index_expr() {
 }
 
 #[test]
+fn parse_array_subscript() {
+    let tests = [
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[2]",
+            Subscript::Index {
+                index: Expr::Value(number("2")),
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[foo]",
+            Subscript::Index {
+                index: Expr::Identifier(Ident::new("foo")),
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[2:5]",
+            Subscript::Slice {
+                lower_bound: Some(Expr::Value(number("2"))),
+                upper_bound: Some(Expr::Value(number("5"))),
+                stride: None,
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[2:5:3]",
+            Subscript::Slice {
+                lower_bound: Some(Expr::Value(number("2"))),
+                upper_bound: Some(Expr::Value(number("5"))),
+                stride: Some(Expr::Value(number("3"))),
+            },
+        ),
+        (
+            "arr[array_length(arr) - 3:array_length(arr) - 1]",
+            Subscript::Slice {
+                lower_bound: Some(Expr::BinaryOp {
+                    left: Box::new(call("array_length", [Expr::Identifier(Ident::new("arr"))])),
+                    op: BinaryOperator::Minus,
+                    right: Box::new(Expr::Value(number("3"))),
+                }),
+                upper_bound: Some(Expr::BinaryOp {
+                    left: Box::new(call("array_length", [Expr::Identifier(Ident::new("arr"))])),
+                    op: BinaryOperator::Minus,
+                    right: Box::new(Expr::Value(number("1"))),
+                }),
+                stride: None,
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[:5]",
+            Subscript::Slice {
+                lower_bound: None,
+                upper_bound: Some(Expr::Value(number("5"))),
+                stride: None,
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[2:]",
+            Subscript::Slice {
+                lower_bound: Some(Expr::Value(number("2"))),
+                upper_bound: None,
+                stride: None,
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[:]",
+            Subscript::Slice {
+                lower_bound: None,
+                upper_bound: None,
+                stride: None,
+            },
+        ),
+    ];
+    for (sql, expect) in tests {
+        let Expr::Subscript { subscript, .. } = pg_and_generic().verified_expr(sql) else {
+            panic!("expected subscript expr");
+        };
+        assert_eq!(expect, *subscript);
+    }
+
+    pg_and_generic().verified_expr("schedule[:2][2:]");
+}
+
+#[test]
+fn parse_array_multi_subscript() {
+    let expr = pg_and_generic().verified_expr("make_array(1, 2, 3)[1:2][2]");
+    assert_eq!(
+        Expr::Subscript {
+            expr: Box::new(Expr::Subscript {
+                expr: Box::new(call(
+                    "make_array",
+                    vec![
+                        Expr::Value(number("1")),
+                        Expr::Value(number("2")),
+                        Expr::Value(number("3"))
+                    ]
+                )),
+                subscript: Box::new(Subscript::Slice {
+                    lower_bound: Some(Expr::Value(number("1"))),
+                    upper_bound: Some(Expr::Value(number("2"))),
+                    stride: None,
+                }),
+            }),
+            subscript: Box::new(Subscript::Index {
+                index: Expr::Value(number("2")),
+            }),
+        },
+        expr,
+    );
+}
+
+#[test]
 fn parse_create_index() {
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2)";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -1955,7 +2252,7 @@ fn parse_create_index() {
             nulls_distinct: None,
             include,
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -1973,7 +2270,7 @@ fn parse_create_index() {
 fn parse_create_anonymous_index() {
     let sql = "CREATE INDEX ON my_table(col1,col2)";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name,
             table_name: ObjectName(table_name),
             using,
@@ -1984,7 +2281,7 @@ fn parse_create_anonymous_index() {
             include,
             nulls_distinct: None,
             predicate: None,
-        } => {
+        }) => {
             assert_eq!(None, name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2002,7 +2299,7 @@ fn parse_create_anonymous_index() {
 fn parse_create_index_concurrently() {
     let sql = "CREATE INDEX CONCURRENTLY IF NOT EXISTS my_index ON my_table(col1,col2)";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2013,7 +2310,7 @@ fn parse_create_index_concurrently() {
             include,
             nulls_distinct: None,
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2031,7 +2328,7 @@ fn parse_create_index_concurrently() {
 fn parse_create_index_with_predicate() {
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2) WHERE col3 IS NULL";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2042,7 +2339,7 @@ fn parse_create_index_with_predicate() {
             include,
             nulls_distinct: None,
             predicate: Some(_),
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2060,7 +2357,7 @@ fn parse_create_index_with_predicate() {
 fn parse_create_index_with_include() {
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2) INCLUDE (col3)";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2071,7 +2368,7 @@ fn parse_create_index_with_include() {
             include,
             nulls_distinct: None,
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2089,7 +2386,7 @@ fn parse_create_index_with_include() {
 fn parse_create_index_with_nulls_distinct() {
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2) NULLS NOT DISTINCT";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2100,7 +2397,7 @@ fn parse_create_index_with_nulls_distinct() {
             include,
             nulls_distinct: Some(nulls_distinct),
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2116,7 +2413,7 @@ fn parse_create_index_with_nulls_distinct() {
 
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2) NULLS DISTINCT";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2127,7 +2424,7 @@ fn parse_create_index_with_nulls_distinct() {
             include,
             nulls_distinct: Some(nulls_distinct),
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2147,54 +2444,70 @@ fn parse_array_subquery_expr() {
     let sql = "SELECT ARRAY(SELECT 1 UNION SELECT 2)";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        &Expr::ArraySubquery(Box::new(Query {
-            with: None,
-            body: Box::new(SetExpr::SetOperation {
-                op: SetOperator::Union,
-                set_quantifier: SetQuantifier::None,
-                left: Box::new(SetExpr::Select(Box::new(Select {
-                    distinct: None,
-                    top: None,
-                    projection: vec![SelectItem::UnnamedExpr(Expr::Value(number("1")))],
-                    into: None,
-                    from: vec![],
-                    lateral_views: vec![],
-                    selection: None,
-                    group_by: GroupByExpr::Expressions(vec![]),
-                    cluster_by: vec![],
-                    distribute_by: vec![],
-                    sort_by: vec![],
-                    having: None,
-                    named_window: vec![],
-                    qualify: None,
-                    value_table_mode: None,
-                }))),
-                right: Box::new(SetExpr::Select(Box::new(Select {
-                    distinct: None,
-                    top: None,
-                    projection: vec![SelectItem::UnnamedExpr(Expr::Value(number("2")))],
-                    into: None,
-                    from: vec![],
-                    lateral_views: vec![],
-                    selection: None,
-                    group_by: GroupByExpr::Expressions(vec![]),
-                    cluster_by: vec![],
-                    distribute_by: vec![],
-                    sort_by: vec![],
-                    having: None,
-                    named_window: vec![],
-                    qualify: None,
-                    value_table_mode: None,
-                }))),
-            }),
-            order_by: vec![],
-            limit: None,
-            limit_by: vec![],
-            offset: None,
-            fetch: None,
-            locks: vec![],
-            for_clause: None,
-        })),
+        &Expr::Function(Function {
+            name: ObjectName(vec![Ident::new("ARRAY")]),
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::Subquery(Box::new(Query {
+                with: None,
+                body: Box::new(SetExpr::SetOperation {
+                    op: SetOperator::Union,
+                    set_quantifier: SetQuantifier::None,
+                    left: Box::new(SetExpr::Select(Box::new(Select {
+                        distinct: None,
+                        top: None,
+                        projection: vec![SelectItem::UnnamedExpr(Expr::Value(number("1")))],
+                        into: None,
+                        from: vec![],
+                        lateral_views: vec![],
+                        prewhere: None,
+                        selection: None,
+                        group_by: GroupByExpr::Expressions(vec![], vec![]),
+                        cluster_by: vec![],
+                        distribute_by: vec![],
+                        sort_by: vec![],
+                        having: None,
+                        named_window: vec![],
+                        qualify: None,
+                        window_before_qualify: false,
+                        value_table_mode: None,
+                        connect_by: None,
+                    }))),
+                    right: Box::new(SetExpr::Select(Box::new(Select {
+                        distinct: None,
+                        top: None,
+                        projection: vec![SelectItem::UnnamedExpr(Expr::Value(number("2")))],
+                        into: None,
+                        from: vec![],
+                        lateral_views: vec![],
+                        prewhere: None,
+                        selection: None,
+                        group_by: GroupByExpr::Expressions(vec![], vec![]),
+                        cluster_by: vec![],
+                        distribute_by: vec![],
+                        sort_by: vec![],
+                        having: None,
+                        named_window: vec![],
+                        qualify: None,
+                        window_before_qualify: false,
+                        value_table_mode: None,
+                        connect_by: None,
+                    }))),
+                }),
+                order_by: None,
+                limit: None,
+                limit_by: vec![],
+                offset: None,
+                fetch: None,
+                locks: vec![],
+                for_clause: None,
+                settings: None,
+                format_clause: None,
+            })),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![]
+        }),
         expr_from_projection(only(&select.projection)),
     );
 }
@@ -2230,9 +2543,9 @@ fn test_json() {
     let sql = "SELECT params ->> 'name' FROM events";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        SelectItem::UnnamedExpr(Expr::JsonAccess {
+        SelectItem::UnnamedExpr(Expr::BinaryOp {
             left: Box::new(Expr::Identifier(Ident::new("params"))),
-            operator: JsonOperator::LongArrow,
+            op: BinaryOperator::LongArrow,
             right: Box::new(Expr::Value(Value::SingleQuotedString("name".to_string()))),
         }),
         select.projection[0]
@@ -2241,9 +2554,9 @@ fn test_json() {
     let sql = "SELECT params -> 'name' FROM events";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        SelectItem::UnnamedExpr(Expr::JsonAccess {
+        SelectItem::UnnamedExpr(Expr::BinaryOp {
             left: Box::new(Expr::Identifier(Ident::new("params"))),
-            operator: JsonOperator::Arrow,
+            op: BinaryOperator::Arrow,
             right: Box::new(Expr::Value(Value::SingleQuotedString("name".to_string()))),
         }),
         select.projection[0]
@@ -2252,15 +2565,55 @@ fn test_json() {
     let sql = "SELECT info -> 'items' ->> 'product' FROM orders";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        SelectItem::UnnamedExpr(Expr::JsonAccess {
-            left: Box::new(Expr::Identifier(Ident::new("info"))),
-            operator: JsonOperator::Arrow,
-            right: Box::new(Expr::JsonAccess {
-                left: Box::new(Expr::Value(Value::SingleQuotedString("items".to_string()))),
-                operator: JsonOperator::LongArrow,
-                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                    "product".to_string()
-                )))
+        SelectItem::UnnamedExpr(Expr::BinaryOp {
+            left: Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(Ident::new("info"))),
+                op: BinaryOperator::Arrow,
+                right: Box::new(Expr::Value(Value::SingleQuotedString("items".to_string())))
+            }),
+            op: BinaryOperator::LongArrow,
+            right: Box::new(Expr::Value(Value::SingleQuotedString(
+                "product".to_string()
+            ))),
+        }),
+        select.projection[0]
+    );
+
+    // the RHS can be a number (array element access)
+    let sql = "SELECT obj -> 42";
+    let select = pg().verified_only_select(sql);
+    assert_eq!(
+        SelectItem::UnnamedExpr(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("obj"))),
+            op: BinaryOperator::Arrow,
+            right: Box::new(Expr::Value(number("42"))),
+        }),
+        select.projection[0]
+    );
+
+    // the RHS can be an identifier
+    let sql = "SELECT obj -> key";
+    let select = pg().verified_only_select(sql);
+    assert_eq!(
+        SelectItem::UnnamedExpr(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("obj"))),
+            op: BinaryOperator::Arrow,
+            right: Box::new(Expr::Identifier(Ident::new("key"))),
+        }),
+        select.projection[0]
+    );
+
+    // -> operator has lower precedence than arithmetic ops
+    let sql = "SELECT obj -> 3 * 2";
+    let select = pg().verified_only_select(sql);
+    assert_eq!(
+        SelectItem::UnnamedExpr(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("obj"))),
+            op: BinaryOperator::Arrow,
+            right: Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Value(number("3"))),
+                op: BinaryOperator::Multiply,
+                right: Box::new(Expr::Value(number("2"))),
             }),
         }),
         select.projection[0]
@@ -2269,9 +2622,9 @@ fn test_json() {
     let sql = "SELECT info #> '{a,b,c}' FROM orders";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        SelectItem::UnnamedExpr(Expr::JsonAccess {
+        SelectItem::UnnamedExpr(Expr::BinaryOp {
             left: Box::new(Expr::Identifier(Ident::new("info"))),
-            operator: JsonOperator::HashArrow,
+            op: BinaryOperator::HashArrow,
             right: Box::new(Expr::Value(Value::SingleQuotedString(
                 "{a,b,c}".to_string()
             ))),
@@ -2282,9 +2635,9 @@ fn test_json() {
     let sql = "SELECT info #>> '{a,b,c}' FROM orders";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        SelectItem::UnnamedExpr(Expr::JsonAccess {
+        SelectItem::UnnamedExpr(Expr::BinaryOp {
             left: Box::new(Expr::Identifier(Ident::new("info"))),
-            operator: JsonOperator::HashLongArrow,
+            op: BinaryOperator::HashLongArrow,
             right: Box::new(Expr::Value(Value::SingleQuotedString(
                 "{a,b,c}".to_string()
             ))),
@@ -2295,9 +2648,9 @@ fn test_json() {
     let sql = "SELECT info FROM orders WHERE info @> '{\"a\": 1}'";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        Expr::JsonAccess {
+        Expr::BinaryOp {
             left: Box::new(Expr::Identifier(Ident::new("info"))),
-            operator: JsonOperator::AtArrow,
+            op: BinaryOperator::AtArrow,
             right: Box::new(Expr::Value(Value::SingleQuotedString(
                 "{\"a\": 1}".to_string()
             ))),
@@ -2308,11 +2661,11 @@ fn test_json() {
     let sql = "SELECT info FROM orders WHERE '{\"a\": 1}' <@ info";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        Expr::JsonAccess {
+        Expr::BinaryOp {
             left: Box::new(Expr::Value(Value::SingleQuotedString(
                 "{\"a\": 1}".to_string()
             ))),
-            operator: JsonOperator::ArrowAt,
+            op: BinaryOperator::ArrowAt,
             right: Box::new(Expr::Identifier(Ident::new("info"))),
         },
         select.selection.unwrap(),
@@ -2321,9 +2674,9 @@ fn test_json() {
     let sql = "SELECT info #- ARRAY['a', 'b'] FROM orders";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        SelectItem::UnnamedExpr(Expr::JsonAccess {
+        SelectItem::UnnamedExpr(Expr::BinaryOp {
             left: Box::new(Expr::Identifier(Ident::from("info"))),
-            operator: JsonOperator::HashMinus,
+            op: BinaryOperator::HashMinus,
             right: Box::new(Expr::Array(Array {
                 elem: vec![
                     Expr::Value(Value::SingleQuotedString("a".to_string())),
@@ -2338,9 +2691,9 @@ fn test_json() {
     let sql = "SELECT info FROM orders WHERE info @? '$.a'";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        Expr::JsonAccess {
+        Expr::BinaryOp {
             left: Box::new(Expr::Identifier(Ident::from("info"))),
-            operator: JsonOperator::AtQuestion,
+            op: BinaryOperator::AtQuestion,
             right: Box::new(Expr::Value(Value::SingleQuotedString("$.a".to_string())),),
         },
         select.selection.unwrap(),
@@ -2349,10 +2702,55 @@ fn test_json() {
     let sql = "SELECT info FROM orders WHERE info @@ '$.a'";
     let select = pg().verified_only_select(sql);
     assert_eq!(
-        Expr::JsonAccess {
+        Expr::BinaryOp {
             left: Box::new(Expr::Identifier(Ident::from("info"))),
-            operator: JsonOperator::AtAt,
+            op: BinaryOperator::AtAt,
             right: Box::new(Expr::Value(Value::SingleQuotedString("$.a".to_string())),),
+        },
+        select.selection.unwrap(),
+    );
+
+    let sql = r#"SELECT info FROM orders WHERE info ? 'b'"#;
+    let select = pg().verified_only_select(sql);
+    assert_eq!(
+        Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("info"))),
+            op: BinaryOperator::Question,
+            right: Box::new(Expr::Value(Value::SingleQuotedString("b".to_string()))),
+        },
+        select.selection.unwrap(),
+    );
+
+    let sql = r#"SELECT info FROM orders WHERE info ?& ARRAY['b', 'c']"#;
+    let select = pg().verified_only_select(sql);
+    assert_eq!(
+        Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("info"))),
+            op: BinaryOperator::QuestionAnd,
+            right: Box::new(Expr::Array(Array {
+                elem: vec![
+                    Expr::Value(Value::SingleQuotedString("b".to_string())),
+                    Expr::Value(Value::SingleQuotedString("c".to_string()))
+                ],
+                named: true
+            }))
+        },
+        select.selection.unwrap(),
+    );
+
+    let sql = r#"SELECT info FROM orders WHERE info ?| ARRAY['b', 'c']"#;
+    let select = pg().verified_only_select(sql);
+    assert_eq!(
+        Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("info"))),
+            op: BinaryOperator::QuestionPipe,
+            right: Box::new(Expr::Array(Array {
+                elem: vec![
+                    Expr::Value(Value::SingleQuotedString("b".to_string())),
+                    Expr::Value(Value::SingleQuotedString("c".to_string()))
+                ],
+                named: true
+            }))
         },
         select.selection.unwrap(),
     );
@@ -2369,7 +2767,7 @@ fn parse_json_table_is_not_reserved() {
             name: ObjectName(name),
             ..
         } => assert_eq!("JSON_TABLE", name[0].value),
-        other => panic!("Expected JSON_TABLE to be parsed as a table name, but got {other:?}"),
+        other => panic!("Expected: JSON_TABLE to be parsed as a table name, but got {other:?}"),
     }
 }
 
@@ -2413,21 +2811,24 @@ fn test_composite_value() {
                     Ident::new("information_schema"),
                     Ident::new("_pg_expandarray")
                 ]),
-                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Array(
-                    Array {
-                        elem: vec![
-                            Expr::Value(Value::SingleQuotedString("i".to_string())),
-                            Expr::Value(Value::SingleQuotedString("i".to_string())),
-                        ],
-                        named: true
-                    }
-                )))],
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::List(FunctionArgumentList {
+                    duplicate_treatment: None,
+                    args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Array(
+                        Array {
+                            elem: vec![
+                                Expr::Value(Value::SingleQuotedString("i".to_string())),
+                                Expr::Value(Value::SingleQuotedString("i".to_string())),
+                            ],
+                            named: true
+                        }
+                    )))],
+                    clauses: vec![],
+                }),
                 null_treatment: None,
                 filter: None,
                 over: None,
-                distinct: false,
-                special: false,
-                order_by: vec![],
+                within_group: vec![],
             }))))
         }),
         select.projection[0]
@@ -2556,7 +2957,7 @@ fn parse_escaped_literal_string() {
             .parse_sql_statements(sql)
             .unwrap_err()
             .to_string(),
-        "sql parser error: Unterminated encoded string literal at Line: 1, Column 8"
+        "sql parser error: Unterminated encoded string literal at Line: 1, Column: 8"
     );
 
     let sql = r"SELECT E'\u0001', E'\U0010FFFF', E'\xC', E'\x25', E'\2', E'\45', E'\445'";
@@ -2599,7 +3000,7 @@ fn parse_escaped_literal_string() {
                     .parse_sql_statements(sql)
                     .unwrap_err()
                     .to_string(),
-                "sql parser error: Unterminated encoded string literal at Line: 1, Column 8"
+                "sql parser error: Unterminated encoded string literal at Line: 1, Column: 8"
             );
         }
     }
@@ -2637,52 +3038,48 @@ fn parse_current_functions() {
     assert_eq!(
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::new("CURRENT_CATALOG")]),
-            args: vec![],
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::None,
             null_treatment: None,
             filter: None,
             over: None,
-            distinct: false,
-            special: true,
-            order_by: vec![],
+            within_group: vec![],
         }),
         expr_from_projection(&select.projection[0])
     );
     assert_eq!(
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::new("CURRENT_USER")]),
-            args: vec![],
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::None,
             null_treatment: None,
             filter: None,
             over: None,
-            distinct: false,
-            special: true,
-            order_by: vec![],
+            within_group: vec![],
         }),
         expr_from_projection(&select.projection[1])
     );
     assert_eq!(
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::new("SESSION_USER")]),
-            args: vec![],
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::None,
             null_treatment: None,
             filter: None,
             over: None,
-            distinct: false,
-            special: true,
-            order_by: vec![],
+            within_group: vec![],
         }),
         expr_from_projection(&select.projection[2])
     );
     assert_eq!(
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::new("USER")]),
-            args: vec![],
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::None,
             null_treatment: None,
             filter: None,
             over: None,
-            distinct: false,
-            special: true,
-            order_by: vec![],
+            within_group: vec![],
         }),
         expr_from_projection(&select.projection[3])
     );
@@ -3106,6 +3503,7 @@ fn parse_delimited_identifiers() {
             args,
             with_hints,
             version,
+            with_ordinality: _,
             partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
@@ -3128,13 +3526,16 @@ fn parse_delimited_identifiers() {
     assert_eq!(
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
-            args: vec![],
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![],
+                clauses: vec![],
+            }),
             null_treatment: None,
             filter: None,
             over: None,
-            distinct: false,
-            special: false,
-            order_by: vec![],
+            within_group: vec![],
         }),
         expr_from_projection(&select.projection[1]),
     );
@@ -3143,7 +3544,7 @@ fn parse_delimited_identifiers() {
             assert_eq!(&Expr::Identifier(Ident::with_quote('"', "simple id")), expr);
             assert_eq!(&Ident::with_quote('"', "column alias"), alias);
         }
-        _ => panic!("Expected ExprWithAlias"),
+        _ => panic!("Expected: ExprWithAlias"),
     }
 
     pg().verified_stmt(r#"CREATE TABLE "foo" ("bar" "int")"#);
@@ -3185,16 +3586,18 @@ fn parse_create_function() {
                 OperateFunctionArg::unnamed(DataType::Integer(None)),
             ]),
             return_type: Some(DataType::Integer(None)),
-            params: CreateFunctionBody {
-                language: Some("SQL".into()),
-                behavior: Some(FunctionBehavior::Immutable),
-                called_on_null: Some(FunctionCalledOnNull::Strict),
-                parallel: Some(FunctionParallel::Safe),
-                as_: Some(FunctionDefinition::SingleQuotedDef(
-                    "select $1 + $2;".into()
-                )),
-                ..Default::default()
-            },
+            language: Some("SQL".into()),
+            behavior: Some(FunctionBehavior::Immutable),
+            called_on_null: Some(FunctionCalledOnNull::Strict),
+            parallel: Some(FunctionParallel::Safe),
+            function_body: Some(CreateFunctionBody::AsBeforeOptions(Expr::Value(
+                Value::SingleQuotedString("select $1 + $2;".into())
+            ))),
+            if_not_exists: false,
+            using: None,
+            determinism_specifier: None,
+            options: None,
+            remote_connection: None,
         }
     );
 }
@@ -3220,7 +3623,7 @@ fn parse_drop_function() {
         pg().verified_stmt(sql),
         Statement::DropFunction {
             if_exists: true,
-            func_desc: vec![DropFunctionDesc {
+            func_desc: vec![FunctionDesc {
                 name: ObjectName(vec![Ident {
                     value: "test_func".to_string(),
                     quote_style: None
@@ -3236,7 +3639,7 @@ fn parse_drop_function() {
         pg().verified_stmt(sql),
         Statement::DropFunction {
             if_exists: true,
-            func_desc: vec![DropFunctionDesc {
+            func_desc: vec![FunctionDesc {
                 name: ObjectName(vec![Ident {
                     value: "test_func".to_string(),
                     quote_style: None
@@ -3261,7 +3664,7 @@ fn parse_drop_function() {
         Statement::DropFunction {
             if_exists: true,
             func_desc: vec![
-                DropFunctionDesc {
+                FunctionDesc {
                     name: ObjectName(vec![Ident {
                         value: "test_func1".to_string(),
                         quote_style: None
@@ -3279,7 +3682,7 @@ fn parse_drop_function() {
                         }
                     ]),
                 },
-                DropFunctionDesc {
+                FunctionDesc {
                     name: ObjectName(vec![Ident {
                         value: "test_func2".to_string(),
                         quote_style: None
@@ -3300,6 +3703,108 @@ fn parse_drop_function() {
             ],
             option: None
         }
+    );
+}
+
+#[test]
+fn parse_drop_procedure() {
+    let sql = "DROP PROCEDURE IF EXISTS test_proc";
+    assert_eq!(
+        pg().verified_stmt(sql),
+        Statement::DropProcedure {
+            if_exists: true,
+            proc_desc: vec![FunctionDesc {
+                name: ObjectName(vec![Ident {
+                    value: "test_proc".to_string(),
+                    quote_style: None
+                }]),
+                args: None
+            }],
+            option: None
+        }
+    );
+
+    let sql = "DROP PROCEDURE IF EXISTS test_proc(a INTEGER, IN b INTEGER = 1)";
+    assert_eq!(
+        pg().verified_stmt(sql),
+        Statement::DropProcedure {
+            if_exists: true,
+            proc_desc: vec![FunctionDesc {
+                name: ObjectName(vec![Ident {
+                    value: "test_proc".to_string(),
+                    quote_style: None
+                }]),
+                args: Some(vec![
+                    OperateFunctionArg::with_name("a", DataType::Integer(None)),
+                    OperateFunctionArg {
+                        mode: Some(ArgMode::In),
+                        name: Some("b".into()),
+                        data_type: DataType::Integer(None),
+                        default_expr: Some(Expr::Value(Value::Number("1".parse().unwrap(), false))),
+                    }
+                ]),
+            }],
+            option: None
+        }
+    );
+
+    let sql = "DROP PROCEDURE IF EXISTS test_proc1(a INTEGER, IN b INTEGER = 1), test_proc2(a VARCHAR, IN b INTEGER = 1)";
+    assert_eq!(
+        pg().verified_stmt(sql),
+        Statement::DropProcedure {
+            if_exists: true,
+            proc_desc: vec![
+                FunctionDesc {
+                    name: ObjectName(vec![Ident {
+                        value: "test_proc1".to_string(),
+                        quote_style: None
+                    }]),
+                    args: Some(vec![
+                        OperateFunctionArg::with_name("a", DataType::Integer(None)),
+                        OperateFunctionArg {
+                            mode: Some(ArgMode::In),
+                            name: Some("b".into()),
+                            data_type: DataType::Integer(None),
+                            default_expr: Some(Expr::Value(Value::Number(
+                                "1".parse().unwrap(),
+                                false
+                            ))),
+                        }
+                    ]),
+                },
+                FunctionDesc {
+                    name: ObjectName(vec![Ident {
+                        value: "test_proc2".to_string(),
+                        quote_style: None
+                    }]),
+                    args: Some(vec![
+                        OperateFunctionArg::with_name("a", DataType::Varchar(None)),
+                        OperateFunctionArg {
+                            mode: Some(ArgMode::In),
+                            name: Some("b".into()),
+                            data_type: DataType::Integer(None),
+                            default_expr: Some(Expr::Value(Value::Number(
+                                "1".parse().unwrap(),
+                                false
+                            ))),
+                        }
+                    ]),
+                }
+            ],
+            option: None
+        }
+    );
+
+    let res = pg().parse_sql_statements("DROP PROCEDURE testproc DROP");
+    assert_eq!(
+        ParserError::ParserError("Expected: end of statement, found: DROP".to_string()),
+        res.unwrap_err()
+    );
+
+    let res = pg().parse_sql_statements("DROP PROCEDURE testproc SET NULL");
+    assert_eq!(
+        ParserError::ParserError("Expected: end of statement, found: SET".to_string()),
+        res.unwrap_err()
     );
 }
 
@@ -3390,14 +3895,17 @@ fn parse_select_group_by_grouping_sets() {
         "SELECT brand, size, sum(sales) FROM items_sold GROUP BY size, GROUPING SETS ((brand), (size), ())"
     );
     assert_eq!(
-        GroupByExpr::Expressions(vec![
-            Expr::Identifier(Ident::new("size")),
-            Expr::GroupingSets(vec![
-                vec![Expr::Identifier(Ident::new("brand"))],
-                vec![Expr::Identifier(Ident::new("size"))],
-                vec![],
-            ]),
-        ]),
+        GroupByExpr::Expressions(
+            vec![
+                Expr::Identifier(Ident::new("size")),
+                Expr::GroupingSets(vec![
+                    vec![Expr::Identifier(Ident::new("brand"))],
+                    vec![Expr::Identifier(Ident::new("size"))],
+                    vec![],
+                ]),
+            ],
+            vec![]
+        ),
         select.group_by
     );
 }
@@ -3408,13 +3916,16 @@ fn parse_select_group_by_rollup() {
         "SELECT brand, size, sum(sales) FROM items_sold GROUP BY size, ROLLUP (brand, size)",
     );
     assert_eq!(
-        GroupByExpr::Expressions(vec![
-            Expr::Identifier(Ident::new("size")),
-            Expr::Rollup(vec![
-                vec![Expr::Identifier(Ident::new("brand"))],
-                vec![Expr::Identifier(Ident::new("size"))],
-            ]),
-        ]),
+        GroupByExpr::Expressions(
+            vec![
+                Expr::Identifier(Ident::new("size")),
+                Expr::Rollup(vec![
+                    vec![Expr::Identifier(Ident::new("brand"))],
+                    vec![Expr::Identifier(Ident::new("size"))],
+                ]),
+            ],
+            vec![]
+        ),
         select.group_by
     );
 }
@@ -3425,13 +3936,16 @@ fn parse_select_group_by_cube() {
         "SELECT brand, size, sum(sales) FROM items_sold GROUP BY size, CUBE (brand, size)",
     );
     assert_eq!(
-        GroupByExpr::Expressions(vec![
-            Expr::Identifier(Ident::new("size")),
-            Expr::Cube(vec![
-                vec![Expr::Identifier(Ident::new("brand"))],
-                vec![Expr::Identifier(Ident::new("size"))],
-            ]),
-        ]),
+        GroupByExpr::Expressions(
+            vec![
+                Expr::Identifier(Ident::new("size")),
+                Expr::Cube(vec![
+                    vec![Expr::Identifier(Ident::new("brand"))],
+                    vec![Expr::Identifier(Ident::new("size"))],
+                ]),
+            ],
+            vec![]
+        ),
         select.group_by
     );
 }
@@ -3465,10 +3979,10 @@ fn parse_create_table_with_alias() {
       int2_col INT2,
       float8_col FLOAT8,
       float4_col FLOAT4,
-      bool_col BOOL,
+      bool_col BOOL
     );";
     match pg_and_generic().one_statement_parses_to(sql, "") {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
@@ -3478,7 +3992,7 @@ fn parse_create_table_with_alias() {
             file_format: None,
             location: None,
             ..
-        } => {
+        }) => {
             assert_eq!("public.datatype_aliases", name.to_string());
             assert_eq!(
                 columns,
@@ -3528,6 +4042,50 @@ fn parse_create_table_with_alias() {
 }
 
 #[test]
+fn parse_create_table_with_partition_by() {
+    let sql = "CREATE TABLE t1 (a INT, b TEXT) PARTITION BY RANGE(a)";
+    match pg_and_generic().verified_stmt(sql) {
+        Statement::CreateTable(create_table) => {
+            assert_eq!("t1", create_table.name.to_string());
+            assert_eq!(
+                vec![
+                    ColumnDef {
+                        name: "a".into(),
+                        data_type: DataType::Int(None),
+                        collation: None,
+                        options: vec![]
+                    },
+                    ColumnDef {
+                        name: "b".into(),
+                        data_type: DataType::Text,
+                        collation: None,
+                        options: vec![]
+                    }
+                ],
+                create_table.columns
+            );
+            match *create_table.partition_by.unwrap() {
+                Expr::Function(f) => {
+                    assert_eq!("RANGE", f.name.to_string());
+                    assert_eq!(
+                        FunctionArguments::List(FunctionArgumentList {
+                            duplicate_treatment: None,
+                            clauses: vec![],
+                            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
+                                Expr::Identifier(Ident::new("a"))
+                            ))],
+                        }),
+                        f.args
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
 fn parse_join_constraint_unnest_alias() {
     assert_eq!(
         only(
@@ -3543,8 +4101,10 @@ fn parse_join_constraint_unnest_alias() {
                     Ident::new("a")
                 ])],
                 with_offset: false,
-                with_offset_alias: None
+                with_offset_alias: None,
+                with_ordinality: false,
             },
+            global: false,
             join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
                 left: Box::new(Expr::Identifier("c1".into())),
                 op: BinaryOperator::Eq,
@@ -3605,13 +4165,15 @@ fn test_simple_postgres_insert_with_alias() {
                         Expr::Value(Value::Number("123".to_string(), false))
                     ]]
                 })),
-                order_by: vec![],
+                order_by: None,
                 limit: None,
                 limit_by: vec![],
                 offset: None,
                 fetch: None,
                 locks: vec![],
-                for_clause: None
+                for_clause: None,
+                settings: None,
+                format_clause: None,
             })),
             partitioned: None,
             after_columns: vec![],
@@ -3672,13 +4234,15 @@ fn test_simple_postgres_insert_with_alias() {
                         ))
                     ]]
                 })),
-                order_by: vec![],
+                order_by: None,
                 limit: None,
                 limit_by: vec![],
                 offset: None,
                 fetch: None,
                 locks: vec![],
-                for_clause: None
+                for_clause: None,
+                settings: None,
+                format_clause: None,
             })),
             partitioned: None,
             after_columns: vec![],
@@ -3735,13 +4299,15 @@ fn test_simple_insert_with_quoted_alias() {
                         Expr::Value(Value::SingleQuotedString("0123".to_string()))
                     ]]
                 })),
-                order_by: vec![],
+                order_by: None,
                 limit: None,
                 limit_by: vec![],
                 offset: None,
                 fetch: None,
                 locks: vec![],
-                for_clause: None
+                for_clause: None,
+                settings: None,
+                format_clause: None,
             })),
             partitioned: None,
             after_columns: vec![],
@@ -3781,4 +4347,654 @@ fn parse_mat_cte() {
 
     let sql2 = r#"WITH cte AS NOT MATERIALIZED (SELECT id FROM accounts) SELECT id FROM cte"#;
     pg().verified_stmt(sql2);
+}
+
+#[test]
+fn parse_at_time_zone() {
+    pg_and_generic().verified_expr("CURRENT_TIMESTAMP AT TIME ZONE tz");
+    pg_and_generic().verified_expr("CURRENT_TIMESTAMP AT TIME ZONE ('America/' || 'Los_Angeles')");
+
+    // check precedence
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::AtTimeZone {
+            timestamp: Box::new(Expr::TypedString {
+                data_type: DataType::Timestamp(None, TimezoneInfo::None),
+                value: "2001-09-28 01:00".to_owned(),
+            }),
+            time_zone: Box::new(Expr::Cast {
+                kind: CastKind::DoubleColon,
+                expr: Box::new(Expr::Value(Value::SingleQuotedString(
+                    "America/Los_Angeles".to_owned(),
+                ))),
+                data_type: DataType::Text,
+                format: None,
+            }),
+        }),
+        op: BinaryOperator::Plus,
+        right: Box::new(Expr::Interval(Interval {
+            value: Box::new(Expr::Value(Value::SingleQuotedString(
+                "23 hours".to_owned(),
+            ))),
+            leading_field: None,
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        })),
+    };
+    pretty_assertions::assert_eq!(
+        pg_and_generic().verified_expr(
+            "TIMESTAMP '2001-09-28 01:00' AT TIME ZONE 'America/Los_Angeles'::TEXT + INTERVAL '23 hours'",
+        ),
+        expr
+    );
+}
+
+#[test]
+fn parse_create_table_with_options() {
+    let sql = "CREATE TABLE t (c INT) WITH (foo = 'bar', a = 123)";
+    match pg().verified_stmt(sql) {
+        Statement::CreateTable(CreateTable { with_options, .. }) => {
+            assert_eq!(
+                vec![
+                    SqlOption {
+                        name: "foo".into(),
+                        value: Expr::Value(Value::SingleQuotedString("bar".into())),
+                    },
+                    SqlOption {
+                        name: "a".into(),
+                        value: Expr::Value(number("123")),
+                    },
+                ],
+                with_options
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn test_table_function_with_ordinality() {
+    let from = pg_and_generic()
+        .verified_only_select("SELECT * FROM generate_series(1, 10) WITH ORDINALITY AS t")
+        .from;
+    assert_eq!(1, from.len());
+    match from[0].relation {
+        TableFactor::Table {
+            ref name,
+            with_ordinality: true,
+            ..
+        } => {
+            assert_eq!("generate_series", name.to_string().as_str());
+        }
+        _ => panic!("Expecting TableFactor::Table with ordinality"),
+    }
+}
+
+#[test]
+fn test_table_unnest_with_ordinality() {
+    let from = pg_and_generic()
+        .verified_only_select("SELECT * FROM UNNEST([10, 20, 30]) WITH ORDINALITY AS t")
+        .from;
+    assert_eq!(1, from.len());
+    match from[0].relation {
+        TableFactor::UNNEST {
+            with_ordinality: true,
+            ..
+        } => {}
+        _ => panic!("Expecting TableFactor::UNNEST with ordinality"),
+    }
+}
+
+#[test]
+fn test_escaped_string_literal() {
+    match pg().verified_expr(r#"E'\n'"#) {
+        Expr::Value(Value::EscapedStringLiteral(s)) => {
+            assert_eq!("\n", s);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_create_simple_before_insert_trigger() {
+    let sql = "CREATE TRIGGER check_insert BEFORE INSERT ON accounts FOR EACH ROW EXECUTE FUNCTION check_account_insert";
+    let expected = Statement::CreateTrigger {
+        or_replace: false,
+        is_constraint: false,
+        name: ObjectName(vec![Ident::new("check_insert")]),
+        period: TriggerPeriod::Before,
+        events: vec![TriggerEvent::Insert],
+        table_name: ObjectName(vec![Ident::new("accounts")]),
+        referenced_table_name: None,
+        referencing: vec![],
+        trigger_object: TriggerObject::Row,
+        include_each: true,
+        condition: None,
+        exec_body: TriggerExecBody {
+            exec_type: TriggerExecBodyType::Function,
+            func_desc: FunctionDesc {
+                name: ObjectName(vec![Ident::new("check_account_insert")]),
+                args: None,
+            },
+        },
+        characteristics: None,
+    };
+
+    assert_eq!(pg().verified_stmt(sql), expected);
+}
+
+#[test]
+fn parse_create_after_update_trigger_with_condition() {
+    let sql = "CREATE TRIGGER check_update AFTER UPDATE ON accounts FOR EACH ROW WHEN (NEW.balance > 10000) EXECUTE FUNCTION check_account_update";
+    let expected = Statement::CreateTrigger {
+        or_replace: false,
+        is_constraint: false,
+        name: ObjectName(vec![Ident::new("check_update")]),
+        period: TriggerPeriod::After,
+        events: vec![TriggerEvent::Update(vec![])],
+        table_name: ObjectName(vec![Ident::new("accounts")]),
+        referenced_table_name: None,
+        referencing: vec![],
+        trigger_object: TriggerObject::Row,
+        include_each: true,
+        condition: Some(Expr::Nested(Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::CompoundIdentifier(vec![
+                Ident::new("NEW"),
+                Ident::new("balance"),
+            ])),
+            op: BinaryOperator::Gt,
+            right: Box::new(Expr::Value(number("10000"))),
+        }))),
+        exec_body: TriggerExecBody {
+            exec_type: TriggerExecBodyType::Function,
+            func_desc: FunctionDesc {
+                name: ObjectName(vec![Ident::new("check_account_update")]),
+                args: None,
+            },
+        },
+        characteristics: None,
+    };
+
+    assert_eq!(pg().verified_stmt(sql), expected);
+}
+
+#[test]
+fn parse_create_instead_of_delete_trigger() {
+    let sql = "CREATE TRIGGER check_delete INSTEAD OF DELETE ON accounts FOR EACH ROW EXECUTE FUNCTION check_account_deletes";
+    let expected = Statement::CreateTrigger {
+        or_replace: false,
+        is_constraint: false,
+        name: ObjectName(vec![Ident::new("check_delete")]),
+        period: TriggerPeriod::InsteadOf,
+        events: vec![TriggerEvent::Delete],
+        table_name: ObjectName(vec![Ident::new("accounts")]),
+        referenced_table_name: None,
+        referencing: vec![],
+        trigger_object: TriggerObject::Row,
+        include_each: true,
+        condition: None,
+        exec_body: TriggerExecBody {
+            exec_type: TriggerExecBodyType::Function,
+            func_desc: FunctionDesc {
+                name: ObjectName(vec![Ident::new("check_account_deletes")]),
+                args: None,
+            },
+        },
+        characteristics: None,
+    };
+
+    assert_eq!(pg().verified_stmt(sql), expected);
+}
+
+#[test]
+fn parse_create_trigger_with_multiple_events_and_deferrable() {
+    let sql = "CREATE CONSTRAINT TRIGGER check_multiple_events BEFORE INSERT OR UPDATE OR DELETE ON accounts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION check_account_changes";
+    let expected = Statement::CreateTrigger {
+        or_replace: false,
+        is_constraint: true,
+        name: ObjectName(vec![Ident::new("check_multiple_events")]),
+        period: TriggerPeriod::Before,
+        events: vec![
+            TriggerEvent::Insert,
+            TriggerEvent::Update(vec![]),
+            TriggerEvent::Delete,
+        ],
+        table_name: ObjectName(vec![Ident::new("accounts")]),
+        referenced_table_name: None,
+        referencing: vec![],
+        trigger_object: TriggerObject::Row,
+        include_each: true,
+        condition: None,
+        exec_body: TriggerExecBody {
+            exec_type: TriggerExecBodyType::Function,
+            func_desc: FunctionDesc {
+                name: ObjectName(vec![Ident::new("check_account_changes")]),
+                args: None,
+            },
+        },
+        characteristics: Some(ConstraintCharacteristics {
+            deferrable: Some(true),
+            initially: Some(DeferrableInitial::Deferred),
+            enforced: None,
+        }),
+    };
+
+    assert_eq!(pg().verified_stmt(sql), expected);
+}
+
+#[test]
+fn parse_create_trigger_with_referencing() {
+    let sql = "CREATE TRIGGER check_referencing BEFORE INSERT ON accounts REFERENCING NEW TABLE AS new_accounts OLD TABLE AS old_accounts FOR EACH ROW EXECUTE FUNCTION check_account_referencing";
+    let expected = Statement::CreateTrigger {
+        or_replace: false,
+        is_constraint: false,
+        name: ObjectName(vec![Ident::new("check_referencing")]),
+        period: TriggerPeriod::Before,
+        events: vec![TriggerEvent::Insert],
+        table_name: ObjectName(vec![Ident::new("accounts")]),
+        referenced_table_name: None,
+        referencing: vec![
+            TriggerReferencing {
+                refer_type: TriggerReferencingType::NewTable,
+                is_as: true,
+                transition_relation_name: ObjectName(vec![Ident::new("new_accounts")]),
+            },
+            TriggerReferencing {
+                refer_type: TriggerReferencingType::OldTable,
+                is_as: true,
+                transition_relation_name: ObjectName(vec![Ident::new("old_accounts")]),
+            },
+        ],
+        trigger_object: TriggerObject::Row,
+        include_each: true,
+        condition: None,
+        exec_body: TriggerExecBody {
+            exec_type: TriggerExecBodyType::Function,
+            func_desc: FunctionDesc {
+                name: ObjectName(vec![Ident::new("check_account_referencing")]),
+                args: None,
+            },
+        },
+        characteristics: None,
+    };
+
+    assert_eq!(pg().verified_stmt(sql), expected);
+}
+
+#[test]
+/// While in the parse_create_trigger test we test the full syntax of the CREATE TRIGGER statement,
+/// here we test the invalid cases of the CREATE TRIGGER statement which should cause an appropriate
+/// error to be returned.
+fn parse_create_trigger_invalid_cases() {
+    // Test invalid cases for the CREATE TRIGGER statement
+    let invalid_cases = vec![
+        (
+            "CREATE TRIGGER check_update BEFORE UPDATE ON accounts FUNCTION check_account_update",
+            "Expected: FOR, found: FUNCTION"
+        ),
+        (
+            "CREATE TRIGGER check_update TOMORROW UPDATE ON accounts EXECUTE FUNCTION check_account_update",
+            "Expected: one of BEFORE or AFTER or INSTEAD, found: TOMORROW"
+        ),
+        (
+            "CREATE TRIGGER check_update BEFORE SAVE ON accounts EXECUTE FUNCTION check_account_update",
+            "Expected: one of INSERT or UPDATE or DELETE or TRUNCATE, found: SAVE"
+        )
+    ];
+
+    for (sql, expected_error) in invalid_cases {
+        let res = pg().parse_sql_statements(sql);
+        assert_eq!(
+            format!("sql parser error: {expected_error}"),
+            res.unwrap_err().to_string()
+        );
+    }
+}
+
+#[test]
+fn parse_drop_trigger() {
+    for if_exists in [true, false] {
+        for option in [
+            None,
+            Some(ReferentialAction::Cascade),
+            Some(ReferentialAction::Restrict),
+        ] {
+            let sql = &format!(
+                "DROP TRIGGER{} check_update ON table_name{}",
+                if if_exists { " IF EXISTS" } else { "" },
+                option
+                    .map(|o| format!(" {}", o))
+                    .unwrap_or_else(|| "".to_string())
+            );
+            assert_eq!(
+                pg().verified_stmt(sql),
+                Statement::DropTrigger {
+                    if_exists,
+                    trigger_name: ObjectName(vec![Ident::new("check_update")]),
+                    table_name: ObjectName(vec![Ident::new("table_name")]),
+                    option
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn parse_drop_trigger_invalid_cases() {
+    // Test invalid cases for the DROP TRIGGER statement
+    let invalid_cases = vec![
+        (
+            "DROP TRIGGER check_update ON table_name CASCADE RESTRICT",
+            "Expected: end of statement, found: RESTRICT",
+        ),
+        (
+            "DROP TRIGGER check_update ON table_name CASCADE CASCADE",
+            "Expected: end of statement, found: CASCADE",
+        ),
+        (
+            "DROP TRIGGER check_update ON table_name CASCADE CASCADE CASCADE",
+            "Expected: end of statement, found: CASCADE",
+        ),
+    ];
+
+    for (sql, expected_error) in invalid_cases {
+        let res = pg().parse_sql_statements(sql);
+        assert_eq!(
+            format!("sql parser error: {expected_error}"),
+            res.unwrap_err().to_string()
+        );
+    }
+}
+
+#[test]
+fn parse_trigger_related_functions() {
+    // First we define all parts of the trigger definition,
+    // including the table creation, the function creation, the trigger creation and the trigger drop.
+    // The following example is taken from the PostgreSQL documentation <https://www.postgresql.org/docs/current/plpgsql-trigger.html>
+
+    let sql_table_creation = r#"
+    CREATE TABLE emp (
+        empname           text,
+        salary            integer,
+        last_date         timestamp,
+        last_user         text
+    );
+    "#;
+
+    let sql_create_function = r#"
+    CREATE FUNCTION emp_stamp() RETURNS trigger AS $emp_stamp$
+        BEGIN
+            -- Check that empname and salary are given
+            IF NEW.empname IS NULL THEN
+                RAISE EXCEPTION 'empname cannot be null';
+            END IF;
+            IF NEW.salary IS NULL THEN
+                RAISE EXCEPTION '% cannot have null salary', NEW.empname;
+            END IF;
+    
+            -- Who works for us when they must pay for it?
+            IF NEW.salary < 0 THEN
+                RAISE EXCEPTION '% cannot have a negative salary', NEW.empname;
+            END IF;
+    
+            -- Remember who changed the payroll when
+            NEW.last_date := current_timestamp;
+            NEW.last_user := current_user;
+            RETURN NEW;
+        END;
+    $emp_stamp$ LANGUAGE plpgsql;
+    "#;
+
+    let sql_create_trigger = r#"
+    CREATE TRIGGER emp_stamp BEFORE INSERT OR UPDATE ON emp
+        FOR EACH ROW EXECUTE FUNCTION emp_stamp();
+    "#;
+
+    let sql_drop_trigger = r#"
+    DROP TRIGGER emp_stamp ON emp;
+    "#;
+
+    // Now we parse the statements and check if they are parsed correctly.
+    let mut statements = pg()
+        .parse_sql_statements(&format!(
+            "{}{}{}{}",
+            sql_table_creation, sql_create_function, sql_create_trigger, sql_drop_trigger
+        ))
+        .unwrap();
+
+    assert_eq!(statements.len(), 4);
+    let drop_trigger = statements.pop().unwrap();
+    let create_trigger = statements.pop().unwrap();
+    let create_function = statements.pop().unwrap();
+    let create_table = statements.pop().unwrap();
+
+    // Check the first statement
+    let create_table = match create_table {
+        Statement::CreateTable(create_table) => create_table,
+        _ => panic!("Expected CreateTable statement"),
+    };
+
+    assert_eq!(
+        create_table,
+        CreateTable {
+            or_replace: false,
+            temporary: false,
+            external: false,
+            global: None,
+            if_not_exists: false,
+            transient: false,
+            volatile: false,
+            name: ObjectName(vec![Ident::new("emp")]),
+            columns: vec![
+                ColumnDef {
+                    name: "empname".into(),
+                    data_type: DataType::Text,
+                    collation: None,
+                    options: vec![],
+                },
+                ColumnDef {
+                    name: "salary".into(),
+                    data_type: DataType::Integer(None),
+                    collation: None,
+                    options: vec![],
+                },
+                ColumnDef {
+                    name: "last_date".into(),
+                    data_type: DataType::Timestamp(None, TimezoneInfo::None),
+                    collation: None,
+                    options: vec![],
+                },
+                ColumnDef {
+                    name: "last_user".into(),
+                    data_type: DataType::Text,
+                    collation: None,
+                    options: vec![],
+                },
+            ],
+            constraints: vec![],
+            hive_distribution: HiveDistributionStyle::NONE,
+            hive_formats: Some(HiveFormat {
+                row_format: None,
+                serde_properties: None,
+                storage: None,
+                location: None
+            }),
+            table_properties: vec![],
+            with_options: vec![],
+            file_format: None,
+            location: None,
+            query: None,
+            without_rowid: false,
+            like: None,
+            clone: None,
+            engine: None,
+            comment: None,
+            auto_increment_offset: None,
+            default_charset: None,
+            collation: None,
+            on_commit: None,
+            on_cluster: None,
+            primary_key: None,
+            order_by: None,
+            partition_by: None,
+            cluster_by: None,
+            options: None,
+            strict: false,
+            copy_grants: false,
+            enable_schema_evolution: None,
+            change_tracking: None,
+            data_retention_time_in_days: None,
+            max_data_extension_time_in_days: None,
+            default_ddl_collation: None,
+            with_aggregation_policy: None,
+            with_row_access_policy: None,
+            with_tags: None,
+        }
+    );
+
+    // Check the second statement
+
+    assert_eq!(
+        create_function,
+        Statement::CreateFunction {
+            or_replace: false,
+            temporary: false,
+            if_not_exists: false,
+            name: ObjectName(vec![Ident::new("emp_stamp")]),
+            args: None,
+            return_type: Some(DataType::Trigger),
+            function_body: Some(
+                CreateFunctionBody::AsBeforeOptions(
+                    Expr::Value(
+                        Value::DollarQuotedString(
+                            DollarQuotedString {
+                                value: "\n        BEGIN\n            -- Check that empname and salary are given\n            IF NEW.empname IS NULL THEN\n                RAISE EXCEPTION 'empname cannot be null';\n            END IF;\n            IF NEW.salary IS NULL THEN\n                RAISE EXCEPTION '% cannot have null salary', NEW.empname;\n            END IF;\n    \n            -- Who works for us when they must pay for it?\n            IF NEW.salary < 0 THEN\n                RAISE EXCEPTION '% cannot have a negative salary', NEW.empname;\n            END IF;\n    \n            -- Remember who changed the payroll when\n            NEW.last_date := current_timestamp;\n            NEW.last_user := current_user;\n            RETURN NEW;\n        END;\n    ".to_owned(),
+                                tag: Some(
+                                    "emp_stamp".to_owned(),
+                                ),
+                            },
+                        ),
+                    ),
+                ),
+            ),
+            behavior: None,
+            called_on_null: None,
+            parallel: None,
+            using: None,
+            language: Some(Ident::new("plpgsql")),
+            determinism_specifier: None,
+            options: None,
+            remote_connection: None
+        }
+    );
+
+    // Check the third statement
+
+    assert_eq!(
+        create_trigger,
+        Statement::CreateTrigger {
+            or_replace: false,
+            is_constraint: false,
+            name: ObjectName(vec![Ident::new("emp_stamp")]),
+            period: TriggerPeriod::Before,
+            events: vec![TriggerEvent::Insert, TriggerEvent::Update(vec![])],
+            table_name: ObjectName(vec![Ident::new("emp")]),
+            referenced_table_name: None,
+            referencing: vec![],
+            trigger_object: TriggerObject::Row,
+            include_each: true,
+            condition: None,
+            exec_body: TriggerExecBody {
+                exec_type: TriggerExecBodyType::Function,
+                func_desc: FunctionDesc {
+                    name: ObjectName(vec![Ident::new("emp_stamp")]),
+                    args: None,
+                }
+            },
+            characteristics: None
+        }
+    );
+
+    // Check the fourth statement
+    assert_eq!(
+        drop_trigger,
+        Statement::DropTrigger {
+            if_exists: false,
+            trigger_name: ObjectName(vec![Ident::new("emp_stamp")]),
+            table_name: ObjectName(vec![Ident::new("emp")]),
+            option: None
+        }
+    );
+}
+
+#[test]
+fn test_unicode_string_literal() {
+    let pairs = [
+        // Example from the postgres docs
+        (r#"U&'\0441\043B\043E\043D'"#, "слон"),
+        // High unicode code point (> 0xFFFF)
+        (r#"U&'\+01F418'"#, "🐘"),
+        // Escaped backslash
+        (r#"U&'\\'"#, r#"\"#),
+        // Escaped single quote
+        (r#"U&''''"#, "'"),
+    ];
+    for (input, expected) in pairs {
+        match pg_and_generic().verified_expr(input) {
+            Expr::Value(Value::UnicodeStringLiteral(s)) => {
+                assert_eq!(expected, s);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn check_arrow_precedence(sql: &str, arrow_operator: BinaryOperator) {
+    assert_eq!(
+        pg().verified_expr(sql),
+        Expr::BinaryOp {
+            left: Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(Ident {
+                    value: "foo".to_string(),
+                    quote_style: None,
+                })),
+                op: arrow_operator,
+                right: Box::new(Expr::Value(Value::SingleQuotedString("bar".to_string()))),
+            }),
+            op: BinaryOperator::Eq,
+            right: Box::new(Expr::Value(Value::SingleQuotedString("spam".to_string()))),
+        }
+    )
+}
+
+#[test]
+fn arrow_precedence() {
+    check_arrow_precedence("foo -> 'bar' = 'spam'", BinaryOperator::Arrow);
+}
+
+#[test]
+fn long_arrow_precedence() {
+    check_arrow_precedence("foo ->> 'bar' = 'spam'", BinaryOperator::LongArrow);
+}
+
+#[test]
+fn arrow_cast_precedence() {
+    // check this matches postgres where you would need `(foo -> 'bar')::TEXT`
+    let stmt = pg().verified_expr("foo -> 'bar'::TEXT");
+    assert_eq!(
+        stmt,
+        Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident {
+                value: "foo".to_string(),
+                quote_style: None,
+            })),
+            op: BinaryOperator::Arrow,
+            right: Box::new(Expr::Cast {
+                kind: CastKind::DoubleColon,
+                expr: Box::new(Expr::Value(Value::SingleQuotedString("bar".to_string()))),
+                data_type: DataType::Text,
+                format: None,
+            }),
+        }
+    )
 }

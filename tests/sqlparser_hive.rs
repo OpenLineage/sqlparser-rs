@@ -16,11 +16,12 @@
 //! is also tested (on the inputs it can handle).
 
 use sqlparser::ast::{
-    CreateFunctionBody, CreateFunctionUsing, Expr, Function, FunctionDefinition, Ident, ObjectName,
-    SelectItem, Statement, TableFactor, UnaryOperator,
+    CreateFunctionBody, CreateFunctionUsing, Expr, Function, FunctionArgumentList,
+    FunctionArguments, Ident, ObjectName, OneOrManyWithParens, SelectItem, Statement, TableFactor,
+    UnaryOperator, Use, Value,
 };
 use sqlparser::dialect::{GenericDialect, HiveDialect, MsSqlDialect};
-use sqlparser::parser::{ParserError, ParserOptions};
+use sqlparser::parser::ParserError;
 use sqlparser::test_utils::*;
 
 #[test]
@@ -34,18 +35,11 @@ fn parse_table_create() {
     hive().verified_stmt(serdeproperties);
 }
 
-fn generic(options: Option<ParserOptions>) -> TestedDialects {
-    TestedDialects {
-        dialects: vec![Box::new(GenericDialect {})],
-        options,
-    }
-}
-
 #[test]
 fn parse_describe() {
-    let describe = r#"DESCRIBE namespace.`table`"#;
-    hive().verified_stmt(describe);
-    generic(None).verified_stmt(describe);
+    hive_and_generic().verified_stmt(r#"DESCRIBE namespace.`table`"#);
+    hive_and_generic().verified_stmt(r#"DESCRIBE namespace.table"#);
+    hive_and_generic().verified_stmt(r#"DESCRIBE table"#);
 }
 
 #[test]
@@ -267,12 +261,12 @@ fn set_statement_with_minus() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![
+            variables: OneOrManyWithParens::One(ObjectName(vec![
                 Ident::new("hive"),
                 Ident::new("tez"),
                 Ident::new("java"),
                 Ident::new("opts")
-            ]),
+            ])),
             value: vec![Expr::UnaryOp {
                 op: UnaryOperator::Minus,
                 expr: Box::new(Expr::Identifier(Ident::new("Xmx4g")))
@@ -283,7 +277,7 @@ fn set_statement_with_minus() {
     assert_eq!(
         hive().parse_sql_statements("SET hive.tez.java.opts = -"),
         Err(ParserError::ParserError(
-            "Expected variable value, found: EOF".to_string()
+            "Expected: variable value, found: EOF".to_string()
         ))
     )
 }
@@ -295,22 +289,23 @@ fn parse_create_function() {
         Statement::CreateFunction {
             temporary,
             name,
-            params,
+            function_body,
+            using,
             ..
         } => {
             assert!(temporary);
             assert_eq!(name.to_string(), "mydb.myfunc");
             assert_eq!(
-                params,
-                CreateFunctionBody {
-                    as_: Some(FunctionDefinition::SingleQuotedDef(
-                        "org.random.class.Name".to_string()
-                    )),
-                    using: Some(CreateFunctionUsing::Jar(
-                        "hdfs://somewhere.com:8020/very/far".to_string()
-                    )),
-                    ..Default::default()
-                }
+                function_body,
+                Some(CreateFunctionBody::AsBeforeOptions(Expr::Value(
+                    Value::SingleQuotedString("org.random.class.Name".to_string())
+                )))
+            );
+            assert_eq!(
+                using,
+                Some(CreateFunctionUsing::Jar(
+                    "hdfs://somewhere.com:8020/very/far".to_string()
+                )),
             )
         }
         _ => unreachable!(),
@@ -325,33 +320,15 @@ fn parse_create_function() {
     assert_eq!(
         unsupported_dialects.parse_sql_statements(sql).unwrap_err(),
         ParserError::ParserError(
-            "Expected an object type after CREATE, found: FUNCTION".to_string()
+            "Expected: an object type after CREATE, found: FUNCTION".to_string()
         )
     );
 
     let sql = "CREATE TEMPORARY FUNCTION mydb.myfunc AS 'org.random.class.Name' USING JAR";
     assert_eq!(
         hive().parse_sql_statements(sql).unwrap_err(),
-        ParserError::ParserError("Expected literal string, found: EOF".to_string()),
+        ParserError::ParserError("Expected: literal string, found: EOF".to_string()),
     );
-}
-
-#[test]
-fn filtering_during_aggregation() {
-    let rename = "SELECT \
-        ARRAY_AGG(name) FILTER (WHERE name IS NOT NULL), \
-        ARRAY_AGG(name) FILTER (WHERE name LIKE 'a%') \
-        FROM region";
-    println!("{}", hive().verified_stmt(rename));
-}
-
-#[test]
-fn filtering_during_aggregation_aliased() {
-    let rename = "SELECT \
-        ARRAY_AGG(name) FILTER (WHERE name IS NOT NULL) AS agg1, \
-        ARRAY_AGG(name) FILTER (WHERE name LIKE 'a%') AS agg2 \
-        FROM region";
-    println!("{}", hive().verified_stmt(rename));
 }
 
 #[test]
@@ -375,6 +352,7 @@ fn parse_delimited_identifiers() {
             args,
             with_hints,
             version,
+            with_ordinality: _,
             partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
@@ -397,13 +375,16 @@ fn parse_delimited_identifiers() {
     assert_eq!(
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
-            args: vec![],
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![],
+                clauses: vec![],
+            }),
             null_treatment: None,
             filter: None,
             over: None,
-            distinct: false,
-            special: false,
-            order_by: vec![],
+            within_group: vec![],
         }),
         expr_from_projection(&select.projection[1]),
     );
@@ -412,7 +393,7 @@ fn parse_delimited_identifiers() {
             assert_eq!(&Expr::Identifier(Ident::with_quote('"', "simple id")), expr);
             assert_eq!(&Ident::with_quote('"', "column alias"), alias);
         }
-        _ => panic!("Expected ExprWithAlias"),
+        _ => panic!("Expected: ExprWithAlias"),
     }
 
     hive().verified_stmt(r#"CREATE TABLE "foo" ("bar" "int")"#);
@@ -420,9 +401,46 @@ fn parse_delimited_identifiers() {
     //TODO verified_stmt(r#"UPDATE foo SET "bar" = 5"#);
 }
 
+#[test]
+fn parse_use() {
+    let valid_object_names = ["mydb", "SCHEMA", "DATABASE", "CATALOG", "WAREHOUSE"];
+    let quote_styles = ['\'', '"', '`'];
+    for object_name in &valid_object_names {
+        // Test single identifier without quotes
+        assert_eq!(
+            hive().verified_stmt(&format!("USE {}", object_name)),
+            Statement::Use(Use::Object(ObjectName(vec![Ident::new(
+                object_name.to_string()
+            )])))
+        );
+        for &quote in &quote_styles {
+            // Test single identifier with different type of quotes
+            assert_eq!(
+                hive().verified_stmt(&format!("USE {}{}{}", quote, object_name, quote)),
+                Statement::Use(Use::Object(ObjectName(vec![Ident::with_quote(
+                    quote,
+                    object_name.to_string(),
+                )])))
+            );
+        }
+    }
+    // Test DEFAULT keyword that is special case in Hive
+    assert_eq!(
+        hive().verified_stmt("USE DEFAULT"),
+        Statement::Use(Use::Default)
+    );
+}
+
 fn hive() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(HiveDialect {})],
+        options: None,
+    }
+}
+
+fn hive_and_generic() -> TestedDialects {
+    TestedDialects {
+        dialects: vec![Box::new(HiveDialect {}), Box::new(GenericDialect {})],
         options: None,
     }
 }
